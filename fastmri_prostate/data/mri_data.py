@@ -1,7 +1,62 @@
 import h5py
 import numpy as np
+import twixtools
 import xml.etree.ElementTree as etree
 from typing import Dict, List, Optional, Sequence, Tuple
+
+
+def get_slice_order(hdr):
+    temp = hdr['Config']['chronSliceIndices']
+    temp = ' '.join(temp.split())
+    temp = [int(i) for i in temp.split()]
+    slice_order = [i for i in temp if i != -1] 
+    
+    slice_order = np.concatenate([np.where(slice_order == i)[0] for i in np.arange(len(slice_order))])
+
+    return slice_order
+
+
+def load_dat_file_T2(raw_dat_file: str) -> Tuple: 
+    """
+    Load T2 fastmri file.
+    
+    Parameters:
+    -----------
+    fname : str
+        Path to the h5 fastmri file.
+    
+    Returns:
+
+    """
+
+    try:
+        twix = twixtools.read_twix(str(raw_dat_file))
+        mapped = twixtools.map_twix(twix)
+        
+        im_data = mapped[-1]['image']
+        refscan_data = np.squeeze(mapped[-1]['refscan'][:])
+        hdr = mapped[-1]['hdr']
+
+        im_data.flags['remove_os'] = False
+        im_data.flags['average']['Ave'] = False
+
+        data = im_data[:].squeeze()
+
+        slice_order = get_slice_order(hdr)
+        data = data[slice_order, ...]
+        refscan_data = refscan_data[slice_order, ...]
+
+        data = np.transpose(data, (1, 0, 3, 4, 2))
+        refscan_data = np.transpose(refscan_data, (0, 2, 3, 1))
+
+        data = np.flip(data, axis = 1)
+        refscan_data = np.flip(refscan_data, axis = 0)
+
+        return data, refscan_data, hdr
+    
+    except ValueError as e:
+        print(f"Error processing {raw_dat_file}: {e}")
+        return None, None, None
 
 
 def load_file_T2(fname: str) -> Tuple:
@@ -60,7 +115,7 @@ def load_file_dwi(fname: str) -> Tuple:
     return kspace, calibration, coil_sens_maps, hdr
 
 
-def get_padding(hdr: str) -> float:
+def get_padding_from_xml(hdr: str) -> float:
     """
     Extract the padding value from an XML header string.
 
@@ -83,6 +138,20 @@ def get_padding(hdr: str) -> float:
     padding = (enc_x - enc_limits_max)/2                                                         
 
     return padding
+
+
+def get_padding(data_shape: Tuple) -> int:
+    try:
+        #max_enc = int(hdr['MeasYaps']['sKSpace']['lPhaseEncodingLines']) + 1
+        #enc_x = int(hdr['MeasYaps']['sKSpace']['lBaseResolution'])
+        ro, pe = data_shape[-2], data_shape[-1]
+        padding = (ro - pe) / 2
+
+        return padding
+
+    except KeyError as e:
+        print(f"Key error: {e}")
+        return None
 
 
 def et_query(root: etree.Element, qlist: Sequence[str], namespace: str = "http://www.ismrm.org/ISMRMRD") -> str:
@@ -120,15 +189,13 @@ def et_query(root: etree.Element, qlist: Sequence[str], namespace: str = "http:/
     return str(value.text)
 
 
-def zero_pad_kspace_hdr(hdr: str, unpadded_kspace: np.ndarray) -> np.ndarray:
+def zero_pad_kspace_hdr(unpadded_kspace: np.ndarray) -> np.ndarray:
     """
     Perform zero-padding on k-space data to have the same number of
     points in the x- and y-directions.
 
     Parameters
     ----------
-    hdr : str
-        The XML header string.
     unpadded_kspace : array-like of shape (sl, ro , coils, pe)
         The k-space data to be padded.
 
@@ -148,7 +215,7 @@ def zero_pad_kspace_hdr(hdr: str, unpadded_kspace: np.ndarray) -> np.ndarray:
     side having an additional zero-padding.
 
     """
-    padding = get_padding(hdr)                                                                    
+    padding = get_padding(unpadded_kspace.shape)                                                                    
     if padding%2 != 0:
         padding_left = int(np.floor(padding))                                                    
         padding_right = int(np.ceil(padding))
