@@ -26,6 +26,9 @@ cd fastmri_prostate
 pip install -e .
 ```
 
+## Internal Usage
+```fastmri_prostate_recon_from_dat.py``` contains code to read files from SEIMENS dat files and construct T2 volumes
+
 ## Usage
 The repository is centered around the ```fastmri_prostate``` package. The following breaks down the basic structure:
 
