@@ -7,7 +7,7 @@ from fastmri_prostate.reconstruction.utils import center_crop_im, ifftnd
 from fastmri_prostate.reconstruction.grappa import Grappa
 
 
-def image_recon(kspace_post_grappa_all: np.ndarray, hdr) -> Dict:
+def image_recon(kspace_post_grappa_all: np.ndarray, calib_data: np.ndarray, hdr) -> Dict:
     num_avg, num_slices, num_coils, num_ro, num_pe = kspace_post_grappa_all.shape
     im = np.zeros((num_avg, num_slices, num_ro, num_ro))
     for average in range(num_avg): 
@@ -20,6 +20,7 @@ def image_recon(kspace_post_grappa_all: np.ndarray, hdr) -> Dict:
     img_dict = {}
     img_dict['reconstruction_rss'] = center_crop_im(im_3d, [320, 320]) 
     img_dict['kspace_post_grappa'] = kspace_post_grappa_all
+    img_dict['calibration_data'] = calib_data
 
     return img_dict
 
@@ -80,7 +81,7 @@ def t2_reconstruction(kspace_data: np.ndarray, calib_data: np.ndarray, hdr: Dict
             )
             kspace_post_grappa_all[average, slice_num, ...] = np.moveaxis(np.moveaxis(kspace_post_grappa, 0, 1), 1, 2)
 
-    return image_recon(kspace_post_grappa_all, hdr)
+    return image_recon(kspace_post_grappa_all, calib_data, hdr)
 
 
 def create_coil_combined_im(multicoil_multislice_kspace: np.ndarray) -> np.ndarray:
