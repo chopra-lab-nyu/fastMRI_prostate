@@ -1,12 +1,30 @@
 import os
 import numpy as np
+from typing import Dict
 
 from fastmri_prostate.data.mri_data import zero_pad_kspace_hdr
 from fastmri_prostate.reconstruction.utils import center_crop_im, ifftnd
 from fastmri_prostate.reconstruction.grappa import Grappa
 
 
-def t2_reconstruction(kspace_data: np.ndarray, calib_data: np.ndarray, hdr: str) -> np.ndarray:
+def image_recon(kspace_post_grappa_all: np.ndarray, hdr) -> Dict:
+    num_avg, num_slices, num_coils, num_ro, num_pe = kspace_post_grappa_all.shape
+    im = np.zeros((num_avg, num_slices, num_ro, num_ro))
+    for average in range(num_avg): 
+        kspace_grappa = kspace_post_grappa_all[average, ...]
+        kspace_grappa_padded = zero_pad_kspace_hdr(kspace_grappa)
+        im[average] = create_coil_combined_im(kspace_grappa_padded)
+
+    im_3d = np.mean(im, axis = 0) 
+    # center crop image to 320 x 320
+    img_dict = {}
+    img_dict['reconstruction_rss'] = center_crop_im(im_3d, [320, 320]) 
+    img_dict['kspace_post_grappa'] = kspace_post_grappa_all
+
+    return img_dict
+
+
+def t2_reconstruction(kspace_data: np.ndarray, calib_data: np.ndarray, hdr: Dict) -> None:
     """
     Perform T2-weighted image reconstruction using GRAPPA technique.
 
@@ -16,8 +34,8 @@ def t2_reconstruction(kspace_data: np.ndarray, calib_data: np.ndarray, hdr: str)
         Input k-space data with shape (num_aves, num_slices, num_coils, num_ro, num_pe)
     calib_data: numpy.ndarray
         Calibration data for GRAPPA with shape (num_slices, num_coils, num_pe_cal)
-    hdr: str
-         The XML header string.
+    hdr:
+        Dict
          
     Returns:
     --------
@@ -62,20 +80,8 @@ def t2_reconstruction(kspace_data: np.ndarray, calib_data: np.ndarray, hdr: str)
             )
             kspace_post_grappa_all[average, slice_num, ...] = np.moveaxis(np.moveaxis(kspace_post_grappa, 0, 1), 1, 2)
 
-    # recon image for each average
-    im = np.zeros((num_avg, num_slices, num_ro, num_ro))
-    for average in range(num_avg): 
-        kspace_grappa = kspace_post_grappa_all[average, ...]
-        kspace_grappa_padded = zero_pad_kspace_hdr(hdr, kspace_grappa)
-        im[average] = create_coil_combined_im(kspace_grappa_padded)
+    return image_recon(kspace_post_grappa_all, hdr)
 
-    im_3d = np.mean(im, axis = 0) 
-    # center crop image to 320 x 320
-    img_dict = {}
-    img_dict['reconstruction_rss'] = center_crop_im(im_3d, [320, 320]) 
-
-    return img_dict
-  
 
 def create_coil_combined_im(multicoil_multislice_kspace: np.ndarray) -> np.ndarray:
     """

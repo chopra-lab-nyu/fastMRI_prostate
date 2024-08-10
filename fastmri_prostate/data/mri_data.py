@@ -1,3 +1,4 @@
+import json
 import h5py
 import numpy as np
 import twixtools
@@ -260,7 +261,7 @@ def get_regridding_params(hdr: str) -> Dict:
     return res
 
 
-def save_recon(outp_dict: Dict[str, any], output_path: str) -> None:
+def save_recon(outp_dict: Dict[str, any], hdr: Dict, output_path: str) -> None:
     """
     Save reconstruction results to an HDF5 file.
 
@@ -268,6 +269,8 @@ def save_recon(outp_dict: Dict[str, any], output_path: str) -> None:
     ----------
     outp_dict : dict
         A dictionary containing the reconstructed images, with the image names as keys.
+    hdr : dict
+        A dictionary containing the header information.
     output_path : str
         The file path to save the reconstructed images.
 
@@ -276,7 +279,13 @@ def save_recon(outp_dict: Dict[str, any], output_path: str) -> None:
     None
     """
 
-    hf = h5py.File(output_path, "w")
-    for key, outp in outp_dict.items():
-        hf.create_dataset(key, data=outp)
-    hf.close()  
+    with h5py.File(output_path, "w") as hf:
+        for key, outp in outp_dict.items():
+            hf.create_dataset(key, data=outp)
+        
+        hdr_json = json.dumps(hdr)
+        hf.create_dataset("hdr", data=hdr_json)
+
+        ## To load and parse the JSON string to get the hdr dictionary
+        # hdr_json = hf["hdr"][()]
+        # hdr = json.loads(hdr_json)
