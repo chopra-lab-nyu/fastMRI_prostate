@@ -141,6 +141,14 @@ def get_padding_from_xml(hdr: str) -> float:
     return padding
 
 
+def get_padding_from_hdr(hdr):
+    enc_size_1 = int(hdr['Config']['NPeFTLen'])  # Readout (x) dimension
+    enc_limits_max = int(hdr['Config']['NLinMeas'])  # Max phase-encoding dimension
+
+    padding = (enc_size_1 - enc_limits_max) / 2.0
+    return padding
+
+
 def get_padding(data_shape: Tuple) -> int:
     try:
         #max_enc = int(hdr['MeasYaps']['sKSpace']['lPhaseEncodingLines']) + 1
@@ -190,7 +198,7 @@ def et_query(root: etree.Element, qlist: Sequence[str], namespace: str = "http:/
     return str(value.text)
 
 
-def zero_pad_kspace_hdr(unpadded_kspace: np.ndarray) -> np.ndarray:
+def zero_pad_kspace_hdr(unpadded_kspace: np.ndarray, hdr) -> np.ndarray:
     """
     Perform zero-padding on k-space data to have the same number of
     points in the x- and y-directions.
@@ -199,6 +207,7 @@ def zero_pad_kspace_hdr(unpadded_kspace: np.ndarray) -> np.ndarray:
     ----------
     unpadded_kspace : array-like of shape (sl, ro , coils, pe)
         The k-space data to be padded.
+    hdr : Dict
 
     Returns
     -------
@@ -210,20 +219,22 @@ def zero_pad_kspace_hdr(unpadded_kspace: np.ndarray) -> np.ndarray:
     Notes
     -----
     The padding value is calculated using the `get_padding` function, which
-    extracts the padding value from the XML header string. If the difference
-    between the readout dimension and the maximum phase-encoding dimension
-    is not divisible by 2, the padding is applied asymmetrically, with one
+    extracts the padding value from either a dictionary or XML header string. 
+    If the difference between the readout dimension and the maximum phase-encoding 
+    dimension is not divisible by 2, the padding is applied asymmetrically, with one
     side having an additional zero-padding.
-
     """
-    padding = get_padding(unpadded_kspace.shape)                                                                    
+    if isinstance(hdr, dict):
+        padding = get_padding_from_hdr(hdr)
+    else:
+        padding = get_padding(unpadded_kspace.shape)                                                                    
     if padding%2 != 0:
         padding_left = int(np.floor(padding))                                                    
         padding_right = int(np.ceil(padding))
     else:
         padding_left = int(padding)
         padding_right = int(padding)
-    padded_kspace = np.pad(unpadded_kspace, ((0,0),(0,0),(0,0), (padding_left,padding_right)))     
+    padded_kspace = np.pad(unpadded_kspace, ((0,0),(0,0),(0,0),(padding_left, padding_right)))     
 
     return padded_kspace
 

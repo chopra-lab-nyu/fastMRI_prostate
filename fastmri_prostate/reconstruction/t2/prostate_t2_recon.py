@@ -9,12 +9,14 @@ from fastmri_prostate.reconstruction.grappa import Grappa
 
 def image_recon(kspace_post_grappa_all: np.ndarray, calib_data: np.ndarray, hdr) -> Dict:
     num_avg, num_slices, num_coils, num_ro, num_pe = kspace_post_grappa_all.shape
-    im = np.zeros((num_avg, num_slices, num_ro, num_ro))
+    im_list = []
     for average in range(num_avg): 
         kspace_grappa = kspace_post_grappa_all[average, ...]
-        kspace_grappa_padded = zero_pad_kspace_hdr(kspace_grappa)
-        im[average] = create_coil_combined_im(kspace_grappa_padded)
-
+        kspace_grappa_padded = zero_pad_kspace_hdr(kspace_grappa, hdr)
+        coil_combined_image = create_coil_combined_im(kspace_grappa_padded)
+        im_list.append(coil_combined_image)
+    
+    im = np.array(im_list)
     im_3d = np.mean(im, axis = 0) 
     # center crop image to 320 x 320
     img_dict = {}
