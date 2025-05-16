@@ -41,19 +41,19 @@ def compute_averages(img_vol: torch.Tensor, num_b50_averages: int=4, num_b1000_a
                 img_vol[5:24:6, ...],
                 img_vol[26:48:3, ...]
             ], dim=0)[:num_b1000_averages], dim=0
-        ) / 12,
+        ) / num_b1000_averages,
         'b1000y': torch.sum(
             torch.cat([
                 img_vol[6:25:6, ...],
                 img_vol[27:49:3, ...]
             ], dim=0)[:num_b1000_averages], dim=0
-        ) / 12,        
+        ) / num_b1000_averages,        
         'b1000z': torch.sum(
             torch.cat([
                 img_vol[7:26:6, ...],
                 img_vol[28:50:3, ...]
             ], dim=0)[:num_b1000_averages], dim=0
-        ) / 12,
+        ) / num_b1000_averages,
     }
 
 
