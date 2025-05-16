@@ -10,7 +10,7 @@ from fastmri_prostate.reconstruction.dwi.diffusion_metrics_torch import compute_
 from fastmri_prostate.reconstruction.grappa_torch import Grappa
 from fastmri_prostate.reconstruction.utils_torch import ifftnd, flip_im, center_crop_im
 
-def compute_averages(img_vol: torch.Tensor) -> Dict:
+def compute_averages(img_vol: torch.Tensor, num_b50_averages: int=4, num_b1000_averages: int=12) -> Dict:
     """
     Computes the average of the given image volume for different diffusion-weighted directions.
 
@@ -18,6 +18,10 @@ def compute_averages(img_vol: torch.Tensor) -> Dict:
     ----------
         img_vol : torch.Tensor
             The input image volume containing diffusion-weighted images.
+        num_b50_averages : int
+            The number of b50 averages to use. Default is 4.
+        num_b1000_averages : int
+            The number of b1000 averages to use. Default is 12.            
 
     Returns:
     -------
@@ -29,31 +33,31 @@ def compute_averages(img_vol: torch.Tensor) -> Dict:
     """
 
     return {
-        'b50x': torch.sum(img_vol[2:21:6, ...], dim=0) / 4,
-        'b50y': torch.sum(img_vol[3:22:6, ...], dim=0) / 4,
-        'b50z': torch.sum(img_vol[4:23:6, ...], dim=0) / 4,
+        'b50x': torch.sum(img_vol[2:21:6, ...][:num_b50_averages], dim=0) / num_b50_averages,
+        'b50y': torch.sum(img_vol[3:22:6, ...][:num_b50_averages], dim=0) / num_b50_averages,
+        'b50z': torch.sum(img_vol[4:23:6, ...][:num_b50_averages], dim=0) / num_b50_averages,
         'b1000x': torch.sum(
             torch.cat([
                 img_vol[5:24:6, ...],
                 img_vol[26:48:3, ...]
-            ], dim=0), dim=0
+            ], dim=0)[:num_b1000_averages], dim=0
         ) / 12,
         'b1000y': torch.sum(
             torch.cat([
                 img_vol[6:25:6, ...],
                 img_vol[27:49:3, ...]
-            ], dim=0), dim=0
+            ], dim=0)[:num_b1000_averages], dim=0
         ) / 12,        
         'b1000z': torch.sum(
             torch.cat([
                 img_vol[7:26:6, ...],
                 img_vol[28:50:3, ...]
-            ], dim=0), dim=0
+            ], dim=0)[:num_b1000_averages], dim=0
         ) / 12,
     }
 
 
-def dwi_reconstruction(kspace: torch.Tensor, calibration: torch.Tensor, coil_sens_maps: torch.Tensor, hdr: Dict) -> Dict:
+def dwi_reconstruction(kspace: torch.Tensor, calibration: torch.Tensor, coil_sens_maps: torch.Tensor, hdr: Dict, num_b50_averages: int=4, num_b1000_averages: int=12) -> Dict:
     """ The reconstruction uses trapezoidal regridding to regrid the k-space data and computes GRAPPA weights for each slice 
     of the input k-space data using the calibration data. It applies the computed GRAPPA weights to the k-space data 
     to obtain image data, which is then combined with the coil sensitivity maps to reconstruct the DWI images. 
@@ -69,6 +73,10 @@ def dwi_reconstruction(kspace: torch.Tensor, calibration: torch.Tensor, coil_sen
         The coil sensitivity maps with dimensions (slices, coils, readout, phase).
     hdr : dict
         The header information for the diffusion-weighted imaging.
+    num_b50_averages : int
+        The number of b50 averages to use. Default is 4.
+    num_b1000_averages : int
+        The number of b1000 averages to use. Default is 12.
 
     Returns:
     --------
@@ -107,7 +115,7 @@ def dwi_reconstruction(kspace: torch.Tensor, calibration: torch.Tensor, coil_sen
         img_vol[average] = coil_comb_img
 
     img_vol = torch.abs(img_vol)
-    img_dict = compute_averages(img_vol)
+    img_dict = compute_averages(img_vol, num_b50_averages, num_b1000_averages)
     img_dict = compute_trace_adc_b1500(img_dict)
 
     center_crop_size = (100, 100)
