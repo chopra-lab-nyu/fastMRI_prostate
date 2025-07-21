@@ -32,26 +32,33 @@ def compute_averages(img_vol: torch.Tensor, num_b50_averages: int=4, num_b1000_a
     There are 4 averages for each b50 diffusion direction and 12 averages for each b1000 direction
     """
 
+    assert img_vol.shape[0] == 50 or img_vol.shape[0] == 48, "Num averages in DWI volumes can only be 50 or 48"
+
+    if img_vol.shape[0] == 48:
+        offset = 2
+    else:
+        offset = 0
+
     return {
-        'b50x': torch.sum(img_vol[2:21:6, ...][:num_b50_averages], dim=0) / num_b50_averages,
-        'b50y': torch.sum(img_vol[3:22:6, ...][:num_b50_averages], dim=0) / num_b50_averages,
-        'b50z': torch.sum(img_vol[4:23:6, ...][:num_b50_averages], dim=0) / num_b50_averages,
+        'b50x': torch.sum(img_vol[2 - offset:21:6, ...][:num_b50_averages], dim=0) / num_b50_averages,
+        'b50y': torch.sum(img_vol[3 - offset:22:6, ...][:num_b50_averages], dim=0) / num_b50_averages,
+        'b50z': torch.sum(img_vol[4 - offset:23:6, ...][:num_b50_averages], dim=0) / num_b50_averages,
         'b1000x': torch.sum(
             torch.cat([
-                img_vol[5:24:6, ...],
-                img_vol[26:48:3, ...]
+                img_vol[5 - offset:24:6, ...],
+                img_vol[26 - offset:48:3, ...]
             ], dim=0)[:num_b1000_averages], dim=0
         ) / num_b1000_averages,
         'b1000y': torch.sum(
             torch.cat([
-                img_vol[6:25:6, ...],
-                img_vol[27:49:3, ...]
+                img_vol[6 - offset:25:6, ...],
+                img_vol[27 - offset:49:3, ...]
             ], dim=0)[:num_b1000_averages], dim=0
         ) / num_b1000_averages,        
         'b1000z': torch.sum(
             torch.cat([
-                img_vol[7:26:6, ...],
-                img_vol[28:50:3, ...]
+                img_vol[7 - offset:26:6, ...],
+                img_vol[28 - offset:50:3, ...]
             ], dim=0)[:num_b1000_averages], dim=0
         ) / num_b1000_averages,
     }
