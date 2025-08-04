@@ -62,7 +62,7 @@ def compute_averages(img_vol: np.ndarray, num_b50_averages: int = 4, num_b1000_a
     }
 
 
-def dwi_reconstruction(kspace: np.ndarray, calibration: np.ndarray, coil_sens_maps: np.ndarray, hdr: Dict) -> Dict:
+def dwi_reconstruction(kspace: np.ndarray, calibration: np.ndarray, coil_sens_maps: np.ndarray, hdr: Dict, num_b50_averages: int=4, num_b1000_averages: int=12) -> Dict:
     """ The reconstruction uses trapezoidal regridding to regrid the k-space data and computes GRAPPA weights for each slice 
     of the input k-space data using the calibration data. It applies the computed GRAPPA weights to the k-space data 
     to obtain image data, which is then combined with the coil sensitivity maps to reconstruct the DWI images. 
@@ -78,6 +78,10 @@ def dwi_reconstruction(kspace: np.ndarray, calibration: np.ndarray, coil_sens_ma
         The coil sensitivity maps with dimensions (slices, coils, readout, phase).
     hdr : dict
         The header information for the diffusion-weighted imaging.
+    num_b50_averages : int
+        The number of b50 averages to use. Default is 4.
+    num_b1000_averages : int
+        The number of b1000 averages to use. Default is 12.        
 
     Returns:
     --------
@@ -118,7 +122,7 @@ def dwi_reconstruction(kspace: np.ndarray, calibration: np.ndarray, coil_sens_ma
 
     img_vol = np.abs(img_vol)
 
-    img_dict = compute_averages(img_vol)
+    img_dict = compute_averages(img_vol, num_b50_averages, num_b1000_averages)
     img_dict = compute_trace_adc_b1500(img_dict)
 
     center_crop_size = (100, 100)
