@@ -107,16 +107,19 @@ def t2_reconstruction(kspace_data: torch.Tensor, calib_data: torch.Tensor, hdr: 
             kspace_post_grappa_all[average, slice_num, ...] = kspace_post_grappa.permute(1, 2, 0)
 
     # recon image for each average
-    im = torch.zeros((num_avg, num_slices, num_ro, num_ro))
+    im = []
     for average in range(num_avg): 
         kspace_grappa = kspace_post_grappa_all[average, ...]
         kspace_grappa_padded = zero_pad_kspace_hdr(hdr, kspace_grappa)
-        im[average] = create_coil_combined_im(kspace_grappa_padded)
+        im.append(create_coil_combined_im(kspace_grappa_padded))
 
-    im_3d = torch.mean(im, dim=0) 
+    im_3d = torch.stack(im, dim=0)
+    im_3d = torch.mean(im_3d, dim=0) 
     # center crop image to 320 x 320
     img_dict = {}
     img_dict['reconstruction_rss'] = center_crop_im(im_3d, [320, 320]) 
+    img_dict['kspace_post_grappa'] = kspace_post_grappa_all
+    img_dict['calibration_data'] = calib_data    
 
     return img_dict
   
