@@ -33,8 +33,8 @@ def get_grid_mat(epi_params, os_factor, keep_oversampling):
         i_pts_readout = adc_nos/os_factor
 
     if t_rampup == 0:
-        grid_mat = np.eye(i_pts_readout, adc_nos)
-        return
+        grid_mat = np.eye(int(round(i_pts_readout)), int(round(adc_nos)))
+        return grid_mat
     
     t_step = t_adcdur/(adc_nos-1)
 

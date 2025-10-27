@@ -1,9 +1,9 @@
 import json
+from pathlib import Path
 import h5py
 import numpy as np
-import twixtools
 import xml.etree.ElementTree as etree
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 
 def get_slice_order(hdr):
@@ -15,6 +15,16 @@ def get_slice_order(hdr):
     slice_order = np.concatenate([np.where(slice_order == i)[0] for i in np.arange(len(slice_order))])
 
     return slice_order
+
+
+def _require_twixtools():
+    try:
+        import twixtools  # type: ignore
+    except ImportError as exc:  # pragma: no cover - dependency hint
+        raise ImportError(
+            "twixtools is required to load Siemens .dat files. Install via `pip install twixtools`."
+        ) from exc
+    return twixtools
 
 
 def load_dat_file_T2(raw_dat_file: str) -> Tuple: 
@@ -31,9 +41,10 @@ def load_dat_file_T2(raw_dat_file: str) -> Tuple:
     """
 
     try:
+        twixtools = _require_twixtools()
         twix = twixtools.read_twix(str(raw_dat_file))
         mapped = twixtools.map_twix(twix)
-        
+
         im_data = mapped[-1]['image']
         refscan_data = np.squeeze(mapped[-1]['refscan'][:])
         hdr = mapped[-1]['hdr']
@@ -58,6 +69,79 @@ def load_dat_file_T2(raw_dat_file: str) -> Tuple:
     except ValueError as e:
         print(f"Error processing {raw_dat_file}: {e}")
         return None, None, None
+
+
+def _zero_pad_along_axis(arr: np.ndarray, axis: int, target_size: int) -> np.ndarray:
+    """Zero-pad an array along the specified axis to reach the target size."""
+
+    current = arr.shape[axis]
+    if current >= target_size:
+        return arr
+
+    pad_total = target_size - current
+    pad_before = pad_total // 2
+    pad_after = pad_total - pad_before
+
+    pad_width = [(0, 0)] * arr.ndim
+    pad_width[axis] = (pad_before, pad_after)
+    return np.pad(arr, pad_width, mode='constant')
+
+
+def _extract_epi_params(hdr: Dict) -> Dict[str, float]:
+    """Extract the subset of header parameters required for regridding."""
+
+    config = hdr.get('Config', {})
+    return {
+        'regridrampuptime': float(config.get('RampUpTime', 0.0)),
+        'regridrampdowntime': float(config.get('RampDownTime', 0.0)),
+        'regridflattoptime': float(config.get('FlatTopTime', 0.0)),
+        'regriddelaytime': float(config.get('DelaySamplesTime', 0.0)),
+        'regridadcduration': float(config.get('ADCDuration', 0.0)),
+        'regriddestsamples': float(config.get('DestSamples', 0.0)),
+        'echospacing': float(config.get('RampUpTime', 0.0))
+        + float(config.get('RampDownTime', 0.0))
+        + float(config.get('FlatTopTime', 0.0)),
+    }
+
+
+def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+    """Load Siemens diffusion `.dat` file and return k-space, calibration, and regridding metadata."""
+
+    twixtools = _require_twixtools()
+    twix = twixtools.read_twix(str(raw_dat_file))
+    mapped = twixtools.map_twix(twix)
+
+    im_data = mapped[-1]['image']
+    refscan = mapped[-1]['refscan']
+    hdr = mapped[-1]['hdr']
+
+    im_data.flags['remove_os'] = False
+    im_data.flags['average']['Ave'] = False
+
+    kspace = im_data[:].squeeze()
+    calibration = refscan[:].squeeze()
+
+    slice_order = get_slice_order(hdr)
+    kspace = kspace[:, slice_order, ...]
+    calibration = calibration[slice_order, ...]
+
+    if kspace.shape[2] > calibration.shape[1]:
+        calibration = _zero_pad_along_axis(calibration, axis=1, target_size=kspace.shape[2])
+
+    # Reorder to match reconstruction expectations
+    kspace = np.transpose(kspace, (0, 1, 3, 4, 2)).copy()
+    calibration = np.transpose(calibration, (0, 2, 3, 1)).copy()
+
+    epi_params = _extract_epi_params(hdr)
+    regrid_params = {
+        'rampUpTime': epi_params['regridrampuptime'],
+        'rampDownTime': epi_params['regridrampdowntime'],
+        'flatTopTime': epi_params['regridflattoptime'],
+        'acqDelayTime': epi_params['regriddelaytime'],
+        'echoSpacing': epi_params['echospacing'],
+    }
+
+    return kspace, calibration, regrid_params
 
 
 def load_file_T2(fname: str) -> Tuple:
