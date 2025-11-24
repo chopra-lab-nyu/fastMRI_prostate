@@ -3,7 +3,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import xml.etree.ElementTree as etree
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 
 def get_slice_order(hdr):
@@ -104,8 +104,12 @@ def _extract_epi_params(hdr: Dict) -> Dict[str, float]:
     }
 
 
-def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
-    """Load Siemens diffusion `.dat` file and return k-space, calibration, and regridding metadata."""
+def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Load Siemens diffusion `.dat` file and return k-space, calibration, and metadata.
+
+    The metadata dictionary contains the trapezoidal regridding parameters and the
+    patient identifier extracted from the TWIX header (``metadata['patient_id']``).
+    """
 
     twixtools = _require_twixtools()
     twix = twixtools.read_twix(str(raw_dat_file))
@@ -133,12 +137,17 @@ def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.nd
     calibration = np.transpose(calibration, (0, 2, 3, 1)).copy()
 
     epi_params = _extract_epi_params(hdr)
+    patient_id = hdr.get('Config', {}).get('PatientID') if isinstance(hdr, dict) else None
+    if isinstance(patient_id, bytes):
+        patient_id = patient_id.decode(errors='ignore')
+
     regrid_params = {
         'rampUpTime': epi_params['regridrampuptime'],
         'rampDownTime': epi_params['regridrampdowntime'],
         'flatTopTime': epi_params['regridflattoptime'],
         'acqDelayTime': epi_params['regriddelaytime'],
         'echoSpacing': epi_params['echospacing'],
+        'patient_id': patient_id,
     }
 
     return kspace, calibration, regrid_params

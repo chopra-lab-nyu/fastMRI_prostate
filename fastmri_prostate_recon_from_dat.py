@@ -2,11 +2,11 @@
 
 import argparse
 import logging
+import re
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, List, Sequence, Tuple
 
 import numpy as np
-import pandas as pd
 
 from fastmri_prostate.reconstruction.dwi.prostate_dwi_recon import (
     dwi_reconstruction_esc,
@@ -53,57 +53,26 @@ def parse_average_pair(value: str) -> Tuple[int, int]:
         ) from exc
 
 
-def load_metadata(csv_path: Path) -> Dict[str, str]:
-    df = pd.read_csv(csv_path)
-
-    filename_keys = [
-        "data_filename_dwi",
-        "filename",
-        "file",
-        "path",
-    ]
-    accession_keys = [
-        "AccessionNumber",
-        "accession",
-        "accession_number",
-    ]
-
-    filename_col = next((key for key in filename_keys if key in df.columns), None)
-    accession_col = next((key for key in accession_keys if key in df.columns), None)
-
-    if filename_col is None:
-        logging.warning(
-            "Metadata CSV missing filename column (tried %s); skipping metadata loading",
-            ", ".join(filename_keys),
-        )
-        return {}
-    if accession_col is None:
-        logging.warning(
-            "Metadata CSV missing accession column (tried %s); skipping metadata loading",
-            ", ".join(accession_keys),
-        )
-        return {}
-
-    records = (
-        df[[filename_col, accession_col]]
-        .dropna()
-        .astype(str)
-        .drop_duplicates(subset=[filename_col])
-        .to_dict("records")
-    )
-
-    mapping: Dict[str, str] = {}
-    for record in records:
-        stem = Path(record[filename_col]).stem
-        mapping[stem] = record[accession_col].strip()
-
-    return mapping
-
-
 def _postprocess_volume(volume: np.ndarray) -> np.ndarray:
     processed = flip_im(volume.copy(), 0)
     processed = center_crop_im(processed, CENTER_CROP_SIZE)
     return processed.astype(np.float32)
+
+
+def _sanitize_patient_id(value: Any) -> str:
+    if value is None:
+        return "unknown_patient"
+
+    if isinstance(value, (int, np.integer)):
+        cleaned = str(int(value))
+    elif isinstance(value, (float, np.floating)):
+        cleaned = str(int(value)) if float(value).is_integer() else f"{value}"
+    else:
+        cleaned = str(value).strip()
+
+    if not cleaned:
+        return "unknown_patient"
+    return cleaned
 
 
 def build_dwi_payload(
@@ -111,7 +80,7 @@ def build_dwi_payload(
     directions: Sequence[str],
     averages: Tuple[int, int],
     include_metrics: bool,
-) -> Dict[str, np.ndarray]:
+) -> dict[str, np.ndarray]:
     b50_averages, b1000_averages = averages
     averaged_full = compute_averages(
         esc_result.esc_images_per_average,
@@ -120,7 +89,7 @@ def build_dwi_payload(
     )
     averaged = {direction: averaged_full[direction] for direction in directions}
 
-    payload: Dict[str, np.ndarray] = {}
+    payload: dict[str, np.ndarray] = {}
 
     for direction in directions:
         payload[f"images/averaged/{direction}"] = _postprocess_volume(averaged[direction])
@@ -147,13 +116,23 @@ def build_dwi_payload(
 
 def process_dat_file(
     dat_file: Path,
-    accession: str,
     directions: Sequence[str],
     averages: Tuple[int, int],
     output_dir: Path,
     skip_metrics: bool,
-) -> None:
+) -> Path:
     kspace, calibration, hdr = load_dat_file_dwi(dat_file)
+
+    patient_id_raw = None
+    if isinstance(hdr, dict):
+        patient_id_raw = hdr.pop("patient_id", None)
+    if patient_id_raw is None:
+        logging.warning("Missing PatientID in header for %s", dat_file.name)
+        patient_id = "unknown_patient"
+    else:
+        if isinstance(patient_id_raw, bytes):
+            patient_id_raw = patient_id_raw.decode(errors="ignore")
+        patient_id = _sanitize_patient_id(patient_id_raw)
 
     compute_metrics = not skip_metrics and REQUIRED_FOR_METRICS.issubset(set(directions))
     esc_result = dwi_reconstruction_esc(
@@ -167,9 +146,11 @@ def process_dat_file(
     )
 
     payload = build_dwi_payload(esc_result, directions, averages, compute_metrics)
-
-    output_path = output_dir / f"{accession}.h5"
+    base_stem = dat_file.stem
+    output_name = f"{base_stem}__{patient_id}.h5"
+    output_path = output_dir / output_name
     save_recon(payload, hdr, output_path)
+    return output_path
 
 
 def main() -> None:
@@ -177,14 +158,12 @@ def main() -> None:
 
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
-    metadata_path = Path(args.metadata_csv)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
     directions = parse_directions(args.directions)
     averages = parse_average_pair(args.averages)
-    metadata = load_metadata(metadata_path)
 
     dat_files = sorted(data_dir.glob("*.dat"))
     if not dat_files:
@@ -219,16 +198,13 @@ def main() -> None:
     )
 
     for dat_file in assigned_files:
-        base = dat_file.stem
-        accession = metadata.get(base)
-        if accession is None:
-            logging.warning(
-                "No accession number found for %s in metadata; skipping",
-                dat_file.name,
-            )
+        logging.info("Processing %s", dat_file.name)
+        try:
+            output_path = process_dat_file(dat_file, directions, averages, output_dir, args.skip_metrics)
+        except Exception:  # noqa: BLE001
+            logging.exception("Failed to reconstruct %s", dat_file.name)
             continue
-        logging.info("Processing %s -> accession %s", dat_file.name, accession)
-        process_dat_file(dat_file, accession, directions, averages, output_dir, args.skip_metrics)
+        logging.info("Saved %s", output_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -237,11 +213,6 @@ def parse_args() -> argparse.Namespace:
         "--data-dir",
         required=True,
         help="Directory containing Siemens DWI .dat files",
-    )
-    parser.add_argument(
-        "--metadata-csv",
-        required=True,
-        help="CSV file mapping data filenames to accession numbers",
     )
     parser.add_argument(
         "--output-dir",

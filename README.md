@@ -49,6 +49,70 @@ python fastmri_prostate_recon.py \
     --sequence <t2/dwi/both>
 ```
 
+## Streaming ESC reconstruction (internal cluster)
+
+To process large volumes of diffusion `.dat` files directly from the research drive without staging the full dataset locally, use the streaming pipeline:
+
+```
+fastMRI_prostate/
+├── config/streaming.yaml         # central knobs for paths, throttling, recon args
+├── scripts/transfer.py           # runs on data_mover nodes, copies batches into staging
+├── scripts/worker.py             # runs on compute nodes, watches staging + reconstructs
+├── sbatch/stream_transfer.sbatch # helper submission scripts
+└── sbatch/stream_workers.sbatch
+```
+
+### 1. Configure paths
+
+Edit `config/streaming.yaml` to point to:
+
+- `transfer.manifest_csv`: raw listing of Siemens `.dat` files (the notebook CSV). `scripts/transfer.py` contains the parsing logic (size conversion, prescan pairing, F/M sorting) to automatically pick the main acquisition corresponding to each prescan, based on a listing of all prostate diffusion dat files found on the research drive
+- `transfer.max_files`: optional cap for dry runs; set to 10–20 to validate the streaming system end-to-end before scaling up.
+- `transfer.source_root`: mounted research drive (e.g., `/mnt/td2105/MRIScan`)
+- `transfer.staging_dir`: scratch directory where `.dat` files are copied temporarily
+- `process.metadata_csv`: accession lookup CSV already used by `fastmri_prostate_recon_from_dat.py`
+- `process.output_dir`: final location for `.h5` reconstructions
+
+### 2. Launch transfer job on a data_mover node
+
+```
+sbatch sbatch/stream_transfer.sbatch
+```
+
+This script runs `scripts/transfer.py`, which:
+
+1. Reads the manifest CSV and filters out tiny files
+2. Parses Siemens filename metadata, pairs each main scan with its nearest prescan (<=5 min difference, matching scanner site), and keeps the best match per study
+3. Applies the optional `max_files` limit (if set) so you can run small validation batches
+4. Copies the resulting list of main `.dat` files incrementally from the CIFS/SMB mount to the staging directory
+3. Drops a `.dat.ready` marker once each file is copied
+4. Keeps a `.transfer_active` flag while work remains (used by workers to know when to exit)
+
+The copy loop throttles itself when staging exceeds `max_staging_gb` to avoid filling scratch.
+
+### 3. Launch reconstruction workers on CPU partitions
+
+```
+sbatch sbatch/stream_workers.sbatch
+```
+
+This submits a SLURM array (defaults to 16 workers). Each worker:
+
+1. Watches for `*.dat.ready` markers in staging
+2. Claims a file via a `.lock` directory to prevent duplicate processing
+3. Calls `fastmri_prostate_recon_from_dat.py` helpers to reconstruct the file
+4. Writes the `.h5` to `process.output_dir` and deletes the `.dat` once successful
+
+Workers sleep for `process.poll_seconds` (default 10 s) when no files are available but transfers are still active. They exit automatically after the transfer job clears the active flag and staging is empty.
+
+### 4. Monitor and resume
+
+- Logs: `logs_streaming/*.out`
+- Resume: rerun `stream_transfer.sbatch`; already copied files are skipped thanks to `.copied_manifest.json`
+- Cleanup: staging remains empty except for in-flight files; failed jobs keep their `.dat`/`.ready` for inspection
+
+This layout keeps the workflow reproducible, debuggable, and easy to operate within a single workday.
+
 ## Hardware Requirements
 The reconstruction algorithms implemented in this package requires the following hardware:
 - A computer with at least 32GB of RAM
