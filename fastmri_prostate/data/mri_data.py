@@ -393,3 +393,53 @@ def save_recon(outp_dict: Dict[str, any], hdr: Dict, output_path: str) -> None:
         ## To load and parse the JSON string to get the hdr dictionary
         # hdr_json = hf["hdr"][()]
         # hdr = json.loads(hdr_json)
+
+
+def load_dwi_esc_h5(h5_path: Union[str, Path]) -> Dict[str, Any]:
+    """Load an ESC DWI reconstruction HDF5 file into a nested dictionary.
+
+    Parameters
+    ----------
+    h5_path : str or Path
+        Path to the .h5 file produced by `fastmri_prostate_recon_from_dat`.
+
+    Returns
+    -------
+    dict
+        Flat dictionary keyed by HDF5 dataset paths, e.g.:
+            - images/averaged/<direction>
+            - images/per_average/<direction>
+            - images/esc_full
+            - kspace/esc/<direction>
+            - kspace/post_grappa_full
+            - metadata/directions
+            - metadata/averages
+            - metadata/direction_indices/<direction>
+            - metrics/* (if present)
+            - hdr (parsed JSON dict)
+    """
+    result: Dict[str, Any] = {}
+
+    def _decode(val: Any) -> Any:
+        if isinstance(val, bytes):
+            return val.decode(errors="ignore")
+        if isinstance(val, np.ndarray) and val.dtype.kind == "S":
+            return [v.decode(errors="ignore") for v in val.flat]
+        return val
+
+    with h5py.File(h5_path, "r") as hf:
+        def visitor(name: str, obj: Any) -> None:
+            if isinstance(obj, h5py.Dataset):
+                data = obj[()]
+                if name == "hdr":
+                    try:
+                        data = json.loads(data)
+                    except (json.JSONDecodeError, TypeError):
+                        data = _decode(data)
+                elif isinstance(data, (bytes, np.ndarray)) and getattr(data, "dtype", None) is not None and data.dtype.kind == "S":
+                    data = _decode(data)
+                result[name] = data
+
+        hf.visititems(visitor)
+
+    return result

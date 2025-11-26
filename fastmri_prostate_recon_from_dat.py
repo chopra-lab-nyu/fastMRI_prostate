@@ -29,6 +29,11 @@ DEFAULT_DIRECTIONS: Tuple[str, ...] = ("b50x", "b1000x")
 DEFAULT_AVERAGES: Tuple[int, int] = (4, 12)
 REQUIRED_FOR_METRICS = set(ALL_DIRECTIONS)
 CENTER_CROP_SIZE = (100, 100)
+VALID_AVERAGE_COUNTS = (48, 50)
+
+
+class UnsupportedAverageCountError(RuntimeError):
+    """Raised when a DWI scan has an unsupported number of averages."""
 
 
 def parse_directions(value: str) -> List[str]:
@@ -122,6 +127,12 @@ def process_dat_file(
     skip_metrics: bool,
 ) -> Path:
     kspace, calibration, hdr = load_dat_file_dwi(dat_file)
+
+    avg_count = kspace.shape[0]
+    if avg_count not in VALID_AVERAGE_COUNTS:
+        raise UnsupportedAverageCountError(
+            f"{dat_file.name}: found {avg_count} averages; expected one of {VALID_AVERAGE_COUNTS}"
+        )
 
     patient_id_raw = None
     if isinstance(hdr, dict):

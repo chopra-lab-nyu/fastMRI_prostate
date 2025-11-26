@@ -75,6 +75,11 @@ def build_main_manifest(csv_path: Path, min_bytes: int, max_files: int | None = 
     if "path" not in df_all.columns or "size" not in df_all.columns:
         raise ValueError("Manifest CSV must contain 'path' and 'size' columns")
 
+    path_strings = df_all["path"].astype(str)
+    keep_axial = path_strings.str.contains("AX", case=False, na=False)
+    skip_dl = path_strings.str.contains("DL_DIFFUSION", case=False, na=False)
+    df_all = df_all[keep_axial & ~skip_dl].copy()
+
     parsed = df_all["path"].apply(parse_dat_filename).apply(pd.Series)
     df_all = pd.concat([df_all, parsed], axis=1)
     df_all["size_bytes"] = df_all["size"].apply(human_to_bytes).astype("float64")

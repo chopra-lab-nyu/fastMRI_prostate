@@ -13,6 +13,7 @@ from fastmri_prostate_recon_from_dat import (
     parse_average_pair,
     parse_directions,
     process_dat_file,
+    UnsupportedAverageCountError,
 )
 
 READY_EXT = ".dat.ready"
@@ -83,19 +84,25 @@ def main() -> None:
             claimed = True
             logging.info("Processing %s", dat_file.name)
             try:
-                process_dat_file(
+                result_path = process_dat_file(
                     dat_file=dat_file,
                     directions=directions,
                     averages=avg_pair,
                     output_dir=output_dir,
                     skip_metrics=skip_metrics,
                 )
+            except UnsupportedAverageCountError as exc:
+                logging.warning("%s; removing ready marker", exc)
                 if delete_dat:
                     dat_file.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
-                logging.info("Completed %s", dat_file.name)
             except Exception:
                 logging.exception("Failed %s", dat_file.name)
+            else:
+                if delete_dat:
+                    dat_file.unlink(missing_ok=True)
+                marker.unlink(missing_ok=True)
+                logging.info("Completed %s -> %s", dat_file.name, result_path)
             finally:
                 lock_dir.rmdir()
             break
