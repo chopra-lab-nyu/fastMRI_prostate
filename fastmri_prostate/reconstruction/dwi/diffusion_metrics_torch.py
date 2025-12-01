@@ -143,8 +143,6 @@ def compute_trace_adc_b1500(img_dict: Dict[str, torch.Tensor]) -> Dict[str, torc
             key = f"b{b_value}{axis}"
             adc_vol[:, :, :, j, i] = img_dict[key]
     
-    # print(adc_vol.shape, adc_vol.dtype)
-    print("changed")
     adc_map, b0_img = map(
         torch.stack, 
         zip(*[adc(adc_vol[sl, ...], adc_scale, b_values) for sl in range(recon_shape[0])])
