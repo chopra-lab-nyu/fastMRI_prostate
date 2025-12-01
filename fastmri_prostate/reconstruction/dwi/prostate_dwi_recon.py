@@ -10,7 +10,8 @@ from fastmri_prostate.reconstruction.dwi.diffusion_metrics import compute_trace_
 from fastmri_prostate.reconstruction.grappa import Grappa
 from fastmri_prostate.reconstruction.utils import ifftnd, flip_im, center_crop_im
 
-def compute_averages(img_vol: np.ndarray) -> Dict:
+
+def compute_averages(img_vol: np.ndarray, num_b50_averages: int = 4, num_b1000_averages: int = 12) -> Dict:
     """
     Computes the average of the given image volume for different diffusion-weighted directions.
 
@@ -18,6 +19,10 @@ def compute_averages(img_vol: np.ndarray) -> Dict:
     ----------
         img_vol : np.ndarray
             The input image volume containing diffusion-weighted images.
+        num_b50_averages : int
+            The number of b50 averages to use. Default is 4.
+        num_b1000_averages : int
+            The number of b1000 averages to use. Default is 12.
 
     Returns:
     -------
@@ -25,35 +30,39 @@ def compute_averages(img_vol: np.ndarray) -> Dict:
 
     Notes:
     -----
-    There are 4 averages for each b50 diffusion direction and 12 averages for each b1000 direction
+    There are typically 4 averages for each b50 diffusion direction and 12 averages for each b1000 direction.
     """
 
+    assert img_vol.shape[0] == 50 or img_vol.shape[0] == 48, "Num averages in DWI volumes can only be 50 or 48"
+
+    offset = 2 if img_vol.shape[0] == 48 else 0
+
     return {
-        'b50x': np.sum(img_vol[2:21:6, ...], axis=0) / 4,
-        'b50y': np.sum(img_vol[3:22:6, ...], axis=0) / 4,
-        'b50z': np.sum(img_vol[4:23:6, ...], axis=0) / 4,
+        'b50x': np.sum(img_vol[2 - offset:21:6, ...][:num_b50_averages], axis=0) / num_b50_averages,
+        'b50y': np.sum(img_vol[3 - offset:22:6, ...][:num_b50_averages], axis=0) / num_b50_averages,
+        'b50z': np.sum(img_vol[4 - offset:23:6, ...][:num_b50_averages], axis=0) / num_b50_averages,
         'b1000x': np.sum(
-            np.r_[
-                img_vol[5:24:6, ...],
-                img_vol[26:48:3, ...]
-            ], axis=0
-        ) / 12,
+            np.concatenate([
+                img_vol[5 - offset:24:6, ...],
+                img_vol[26 - offset:48:3, ...]
+            ], axis=0)[:num_b1000_averages], axis=0
+        ) / num_b1000_averages,
         'b1000y': np.sum(
-            np.r_[
-                img_vol[6:25:6, ...],
-                img_vol[27:49:3, ...]
-            ], axis=0
-        ) / 12,        
+            np.concatenate([
+                img_vol[6 - offset:25:6, ...],
+                img_vol[27 - offset:49:3, ...]
+            ], axis=0)[:num_b1000_averages], axis=0
+        ) / num_b1000_averages,
         'b1000z': np.sum(
-            np.r_[
-                img_vol[7:26:6, ...],
-                img_vol[28:50:3, ...]
-            ], axis=0
-        ) / 12,
+            np.concatenate([
+                img_vol[7 - offset:26:6, ...],
+                img_vol[28 - offset:50:3, ...]
+            ], axis=0)[:num_b1000_averages], axis=0
+        ) / num_b1000_averages,
     }
 
 
-def dwi_reconstruction(kspace: np.ndarray, calibration: np.ndarray, coil_sens_maps: np.ndarray, hdr: Dict) -> Dict:
+def dwi_reconstruction(kspace: np.ndarray, calibration: np.ndarray, coil_sens_maps: np.ndarray, hdr: Dict, num_b50_averages: int=4, num_b1000_averages: int=12) -> Dict:
     """ The reconstruction uses trapezoidal regridding to regrid the k-space data and computes GRAPPA weights for each slice 
     of the input k-space data using the calibration data. It applies the computed GRAPPA weights to the k-space data 
     to obtain image data, which is then combined with the coil sensitivity maps to reconstruct the DWI images. 
@@ -69,6 +78,10 @@ def dwi_reconstruction(kspace: np.ndarray, calibration: np.ndarray, coil_sens_ma
         The coil sensitivity maps with dimensions (slices, coils, readout, phase).
     hdr : dict
         The header information for the diffusion-weighted imaging.
+    num_b50_averages : int
+        The number of b50 averages to use. Default is 4.
+    num_b1000_averages : int
+        The number of b1000 averages to use. Default is 12.        
 
     Returns:
     --------
@@ -109,7 +122,7 @@ def dwi_reconstruction(kspace: np.ndarray, calibration: np.ndarray, coil_sens_ma
 
     img_vol = np.abs(img_vol)
 
-    img_dict = compute_averages(img_vol)
+    img_dict = compute_averages(img_vol, num_b50_averages, num_b1000_averages)
     img_dict = compute_trace_adc_b1500(img_dict)
 
     center_crop_size = (100, 100)
