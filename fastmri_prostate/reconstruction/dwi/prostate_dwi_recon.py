@@ -19,6 +19,7 @@ class DWIESCResult:
 
     images: Dict[str, np.ndarray]
     esc_images_per_average: np.ndarray
+    post_grappa_coil_images: np.ndarray
     kspace_esc: np.ndarray
     kspace_by_direction: Dict[str, np.ndarray]
     direction_indices: Dict[str, np.ndarray]
@@ -214,7 +215,8 @@ def dwi_reconstruction_esc(
     Returns
     -------
     DWIESCResult
-        Dataclass bundle with ESC images, ESC k-space, and direction-wise groupings.
+        Dataclass bundle with ESC images, ESC k-space, post-GRAPPA coil-domain images,
+        and direction-wise groupings.
     """
 
     kspace_slice_regridded = trapezoidal_regridding(kspace[0, 0, ...], hdr)
@@ -229,6 +231,10 @@ def dwi_reconstruction_esc(
 
     img_vol = np.zeros((kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4]), dtype=float)
     kspace_esc_vol = np.zeros_like(img_vol, dtype=np.complex64)
+    post_grappa_img_vol = np.zeros(
+        (kspace.shape[0], kspace.shape[1], kspace.shape[2], kspace.shape[3], kspace.shape[4]),
+        dtype=np.complex64,
+    )
 
     for average in range(kspace.shape[0]):
         for slice_num in range(kspace.shape[1]):
@@ -240,9 +246,17 @@ def dwi_reconstruction_esc(
 
             # Bring coil dimension to leading position for ESC
             kspace_coil_first = np.transpose(kspace_post_grappa, (1, 2, 0))
+            coil_domain = np.fft.ifftshift(
+                np.fft.ifftn(
+                    np.fft.fftshift(kspace_coil_first, axes=(1, 2)),
+                    axes=(1, 2),
+                ),
+                axes=(1, 2),
+            )
             esc_kspace, _, esc_image = emulated_single_coil_slice(kspace_coil_first)
             img_vol[average, slice_num] = esc_image
             kspace_esc_vol[average, slice_num] = esc_kspace
+            post_grappa_img_vol[average, slice_num] = coil_domain
 
         if average % 5 == 0:
             logging.info("Processed {0} averages of {1}".format(average, kspace.shape[0]))
@@ -288,6 +302,7 @@ def dwi_reconstruction_esc(
     return DWIESCResult(
         images=img_dict,
         esc_images_per_average=img_vol,
+        post_grappa_coil_images=post_grappa_img_vol,
         kspace_esc=kspace_esc_vol,
         kspace_by_direction=kspace_by_direction,
         direction_indices=direction_indices,
