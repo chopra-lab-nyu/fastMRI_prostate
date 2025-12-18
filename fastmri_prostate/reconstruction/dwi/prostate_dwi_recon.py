@@ -6,25 +6,44 @@ import warnings
 
 import torch
 import scipy.optimize
+from scipy.ndimage import zoom
 
 from fastmri_prostate.reconstruction.dwi.regridding import trapezoidal_regridding
 from fastmri_prostate.reconstruction.dwi.diffusion_metrics import compute_trace_adc_b1500
+from fastmri_prostate.reconstruction.dwi.coil_combine import (
+    espirit_maps_from_calib,
+    combine_with_maps,
+)
 from fastmri_prostate.reconstruction.grappa import Grappa
 from fastmri_prostate.reconstruction.utils import flip_im, center_crop_im
 
 
+def _resize_maps(maps: np.ndarray, target_x: int, target_y: int) -> np.ndarray:
+    """Resample ESPIRiT maps to match reconstruction spatial dims (coils first)."""
+    cx, cy = maps.shape[1], maps.shape[2]
+    if (cx, cy) == (target_x, target_y):
+        return maps
+    zoom_factors = (1.0, target_x / cx, target_y / cy)
+    real = zoom(maps.real, zoom_factors, order=1, mode="nearest")
+    imag = zoom(maps.imag, zoom_factors, order=1, mode="nearest")
+    return real + 1j * imag
+
+
 @dataclass
-class DWIESCResult:
-    """Container for ESC-based diffusion reconstruction outputs."""
+class DWIReconstructionResult:
+    """Container for diffusion reconstruction outputs (ESC/RSS plus coil-domain data)."""
 
     images: Dict[str, np.ndarray]
     esc_images_per_average: np.ndarray
+    rss_images_per_average: np.ndarray
+    espirit_images_per_average: Optional[np.ndarray]
     post_grappa_coil_images: np.ndarray
+    post_grappa_kspace: np.ndarray
     kspace_esc: np.ndarray
     kspace_by_direction: Dict[str, np.ndarray]
     direction_indices: Dict[str, np.ndarray]
 
-    def get_direction_kspace(self, direction: str, max_averages: Optional[int] = None) -> np.ndarray:
+    def get_esc_direction_kspace(self, direction: str, max_averages: Optional[int] = None) -> np.ndarray:
         """Return post-GRAPPA ESC k-space for a diffusion direction limited to the requested averages."""
 
         if direction not in self.direction_indices:
@@ -32,13 +51,7 @@ class DWIESCResult:
 
         indices = self.direction_indices[direction]
         if max_averages is not None:
-            if max_averages <= 0:
-                raise ValueError("max_averages must be positive when provided.")
-            if len(indices) < max_averages:
-                raise ValueError(
-                    f"Requested {max_averages} averages for {direction}, but only {len(indices)} are available."
-                )
-            indices = indices[:max_averages]
+            indices = indices[:max(1, max_averages)]
 
         return self.kspace_esc[np.asarray(indices, dtype=int), ...]
 
@@ -184,7 +197,7 @@ def emulated_single_coil_slice(kspace_slice: np.ndarray) -> Tuple[np.ndarray, np
     return kspace_esc.astype(np.complex64), recon_rss[0], np.abs(recon_esc)
 
 
-def dwi_reconstruction_esc(
+def dwi_reconstruction_diffusion(
     kspace: np.ndarray,
     calibration: np.ndarray,
     hdr: Dict,
@@ -192,7 +205,8 @@ def dwi_reconstruction_esc(
     num_b1000_averages: int = 12,
     directions: Optional[Sequence[str]] = None,
     compute_metrics: bool = True,
-) -> DWIESCResult:
+    enable_espirit: bool = True,
+) -> DWIReconstructionResult:
     """Run GRAPPA + emulated single-coil (ESC) reconstruction.
 
     Parameters
@@ -214,20 +228,18 @@ def dwi_reconstruction_esc(
 
     Returns
     -------
-    DWIESCResult
-        Dataclass bundle with ESC images, ESC k-space, post-GRAPPA coil-domain images,
+    DWIReconstructionResult
+        Dataclass bundle with ESC/RSS images, ESC k-space, post-GRAPPA coil-domain images and k-space,
         and direction-wise groupings.
     """
 
-    kspace_slice_regridded = trapezoidal_regridding(kspace[0, 0, ...], hdr)
-    grappa_obj = Grappa(np.transpose(kspace_slice_regridded, (2, 0, 1)), kernel_size=(5, 5), coil_axis=1)
+    kspace_slice_regridded = trapezoidal_regridding(kspace[0, 0, ...], hdr)  # (coils, x, y)
+    grappa_obj = Grappa(kspace_slice_regridded, kernel_size=(5, 5), coil_axis=0)
 
     grappa_weight_dict = {}
     for slice_num in range(kspace.shape[1]):
         calibration_regridded = trapezoidal_regridding(calibration[slice_num, ...], hdr)
-        grappa_weight_dict[slice_num] = grappa_obj.compute_weights(
-            np.transpose(calibration_regridded, (2, 0 ,1))
-        )
+        grappa_weight_dict[slice_num] = grappa_obj.compute_weights(calibration_regridded)
 
     img_vol = np.zeros((kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4]), dtype=float)
     kspace_esc_vol = np.zeros_like(img_vol, dtype=np.complex64)
@@ -235,17 +247,50 @@ def dwi_reconstruction_esc(
         (kspace.shape[0], kspace.shape[1], kspace.shape[2], kspace.shape[3], kspace.shape[4]),
         dtype=np.complex64,
     )
+    post_grappa_kspace_vol = np.zeros_like(post_grappa_img_vol, dtype=kspace.dtype)
+    rss_img_vol = np.zeros((kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4]), dtype=float)
+    espirit_img_vol = np.zeros_like(rss_img_vol) if enable_espirit else None
+
+    # Precompute ESPIRiT maps per slice (once) if requested
+    espirit_maps = {}
+    if enable_espirit:
+        logging.info("Precomputing ESPIRiT maps for %d slices", kspace.shape[1])
+        for slice_num in range(kspace.shape[1]):
+            calibration_regridded = trapezoidal_regridding(calibration[slice_num, ...], hdr)
+            calib_coil_first = calibration_regridded  # already (coils, x, y)
+            raw_maps = espirit_maps_from_calib(calib_coil_first)
+            espirit_maps[slice_num] = _resize_maps(raw_maps, kspace.shape[3], kspace.shape[4])
+            logging.info(
+                "  Slice %d: ESPIRiT map shape %s -> resized to (%d, %d, %d)",
+                slice_num,
+                raw_maps.shape,
+                espirit_maps[slice_num].shape[0],
+                espirit_maps[slice_num].shape[1],
+                espirit_maps[slice_num].shape[2],
+            )
+        logging.info("Finished ESPIRiT map precompute")
+        for key in espirit_maps:
+            logging.info("  Slice %d: found %s ESPIRiT maps", key, str(espirit_maps[key].shape))
+
+    logging.info(
+        "Starting reconstruction: shape %s interpreted as (averages, slices, coils=%d, x=%d, y=%d)",
+        kspace.shape,
+        kspace.shape[2],
+        kspace.shape[3],
+        kspace.shape[4],
+    )
 
     for average in range(kspace.shape[0]):
+        logging.info("Average %d/%d: running ESC/RSS%s", average + 1, kspace.shape[0], " + ESPIRiT" if enable_espirit else "")
         for slice_num in range(kspace.shape[1]):
             kspace_slice_regridded = trapezoidal_regridding(kspace[average, slice_num, ...], hdr)
             kspace_post_grappa = grappa_obj.apply_weights(
-                np.transpose(kspace_slice_regridded, (2, 0, 1)),
+                kspace_slice_regridded,  # (coils, x, y)
                 grappa_weight_dict[slice_num]
             )
 
-            # Bring coil dimension to leading position for ESC
-            kspace_coil_first = np.transpose(kspace_post_grappa, (1, 2, 0))
+            # GRAPPA output is coil-first (coils, x, y)
+            kspace_coil_first = kspace_post_grappa
             coil_domain = np.fft.ifftshift(
                 np.fft.ifftn(
                     np.fft.fftshift(kspace_coil_first, axes=(1, 2)),
@@ -255,11 +300,17 @@ def dwi_reconstruction_esc(
             )
             esc_kspace, _, esc_image = emulated_single_coil_slice(kspace_coil_first)
             img_vol[average, slice_num] = esc_image
+            rss_img_vol[average, slice_num] = np.sqrt(np.sum(np.abs(coil_domain) ** 2, axis=0))
             kspace_esc_vol[average, slice_num] = esc_kspace
             post_grappa_img_vol[average, slice_num] = coil_domain
+            post_grappa_kspace_vol[average, slice_num] = kspace_post_grappa
+            if enable_espirit and slice_num in espirit_maps:
+                espirit_img_vol[average, slice_num] = combine_with_maps(coil_domain, espirit_maps[slice_num])
 
         if average % 5 == 0:
             logging.info("Processed {0} averages of {1}".format(average, kspace.shape[0]))
+
+    logging.info("Completed ESC/RSS%s for all averages", " + ESPIRiT" if enable_espirit else "")
 
     direction_indices = get_direction_indices(kspace.shape[0])
     if directions is None:
@@ -299,62 +350,14 @@ def dwi_reconstruction_esc(
     for src_img in img_dict.keys():
         img_dict[src_img] = center_crop_im(flip_im(img_dict[src_img], 0), center_crop_size)
 
-    return DWIESCResult(
+    return DWIReconstructionResult(
         images=img_dict,
         esc_images_per_average=img_vol,
+        rss_images_per_average=rss_img_vol,
+        espirit_images_per_average=espirit_img_vol,
         post_grappa_coil_images=post_grappa_img_vol,
+        post_grappa_kspace=post_grappa_kspace_vol,
         kspace_esc=kspace_esc_vol,
         kspace_by_direction=kspace_by_direction,
         direction_indices=direction_indices,
     )
-
-
-def dwi_reconstruction(
-    kspace: np.ndarray,
-    calibration: np.ndarray,
-    coil_sens_maps: np.ndarray,
-    hdr: Dict,
-    num_b50_averages: int = 4,
-    num_b1000_averages: int = 12,
-) -> Dict[str, np.ndarray]:
-    """Backward-compatible wrapper that runs the ESC pipeline.
-
-    Parameters
-    ----------
-    coil_sens_maps : np.ndarray
-        Ignored. Retained for API compatibility with legacy callers.
-    """
-
-    warnings.warn(
-        "`dwi_reconstruction` now runs the ESC workflow; `coil_sens_maps` is ignored. "
-        "Use `dwi_reconstruction_esc` for structured outputs.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
-    result = dwi_reconstruction_esc(
-        kspace,
-        calibration,
-        hdr,
-        num_b50_averages=num_b50_averages,
-        num_b1000_averages=num_b1000_averages,
-    )
-    return result.images
-
-
-def dwi_reconstruction_esc_kspace(
-    kspace: np.ndarray,
-    calibration: np.ndarray,
-    hdr: Dict,
-    directions: Optional[Sequence[str]] = None,
-) -> Dict[str, np.ndarray]:
-    """Convenience wrapper returning only ESC k-space grouped by diffusion direction."""
-
-    result = dwi_reconstruction_esc(
-        kspace,
-        calibration,
-        hdr,
-        directions=directions,
-        compute_metrics=False,
-    )
-    return result.kspace_by_direction

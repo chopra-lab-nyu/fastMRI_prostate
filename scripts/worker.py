@@ -10,6 +10,9 @@ from pathlib import Path
 import yaml
 
 from fastmri_prostate_recon_from_dat import (
+    DEFAULT_AVERAGING_SCHEMES,
+    DEFAULT_DIRECTIONS,
+    DEFAULT_COMBINES,
     parse_average_pair,
     parse_directions,
     process_dat_file,
@@ -55,8 +58,20 @@ def main() -> None:
     output_dir = Path(process_cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    directions = parse_directions(",".join(process_cfg["directions"]))
-    avg_pair = parse_average_pair(f"{process_cfg['averages'][0]}:{process_cfg['averages'][1]}")
+    raw_dirs = process_cfg.get("directions")
+    if raw_dirs in (None, [], "all", "ALL"):
+        directions = list(DEFAULT_DIRECTIONS)
+    else:
+        directions = parse_directions(",".join(raw_dirs))
+
+    raw_avg = process_cfg.get("averages")
+    if raw_avg in (None, [], "all", "ALL"):
+        averaging_schemes = list(DEFAULT_AVERAGING_SCHEMES)
+    else:
+        avg_pair = parse_average_pair(f"{raw_avg[0]}:{raw_avg[1]}")
+        averaging_schemes = [(f"b50_{avg_pair[0]}_b1000_{avg_pair[1]}", avg_pair[0], avg_pair[1])]
+
+    combines = list(DEFAULT_COMBINES)
     skip_metrics = bool(process_cfg["skip_metrics"])
     delete_dat = bool(process_cfg["delete_dat"])
     poll_seconds = int(process_cfg["poll_seconds"])
@@ -87,9 +102,10 @@ def main() -> None:
                 result_path = process_dat_file(
                     dat_file=dat_file,
                     directions=directions,
-                    averages=avg_pair,
+                    averaging_schemes=averaging_schemes,
                     output_dir=output_dir,
                     skip_metrics=skip_metrics,
+                    combines=combines,
                 )
             except UnsupportedAverageCountError as exc:
                 logging.warning("%s; removing ready marker", exc)
@@ -98,6 +114,9 @@ def main() -> None:
                 marker.unlink(missing_ok=True)
             except Exception:
                 logging.exception("Failed %s", dat_file.name)
+                failed_marker = dat_file.with_suffix(dat_file.suffix + ".failed")
+                failed_marker.touch(exist_ok=True)
+                marker.unlink(missing_ok=True)
             else:
                 if delete_dat:
                     dat_file.unlink(missing_ok=True)

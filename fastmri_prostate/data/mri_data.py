@@ -1,4 +1,6 @@
 import json
+import logging
+import struct
 from pathlib import Path
 import h5py
 import numpy as np
@@ -39,37 +41,31 @@ def load_dat_file_T2(raw_dat_file: str) -> Tuple:
     Returns:
 
     """
+    import twixtools
+    twix = twixtools.read_twix(str(raw_dat_file))
+    mapped = twixtools.map_twix(twix)
 
-    try:
-        twixtools = _require_twixtools()
-        twix = twixtools.read_twix(str(raw_dat_file))
-        mapped = twixtools.map_twix(twix)
+    im_data = mapped[-1]['image']
+    refscan_data = np.squeeze(mapped[-1]['refscan'][:])
+    hdr = mapped[-1]['hdr']
 
-        im_data = mapped[-1]['image']
-        refscan_data = np.squeeze(mapped[-1]['refscan'][:])
-        hdr = mapped[-1]['hdr']
+    im_data.flags['remove_os'] = False
+    im_data.flags['average']['Ave'] = False
 
-        im_data.flags['remove_os'] = False
-        im_data.flags['average']['Ave'] = False
+    data = im_data[:].squeeze()
 
-        data = im_data[:].squeeze()
+    slice_order = get_slice_order(hdr)
+    data = data[slice_order, ...]
+    refscan_data = refscan_data[slice_order, ...]
 
-        slice_order = get_slice_order(hdr)
-        data = data[slice_order, ...]
-        refscan_data = refscan_data[slice_order, ...]
+    data = np.transpose(data, (1, 0, 3, 4, 2))
+    refscan_data = np.transpose(refscan_data, (0, 2, 3, 1))
 
-        data = np.transpose(data, (1, 0, 3, 4, 2))
-        refscan_data = np.transpose(refscan_data, (0, 2, 3, 1))
+    data = np.flip(data, axis = 1)
+    refscan_data = np.flip(refscan_data, axis = 0)
 
-        data = np.flip(data, axis = 1)
-        refscan_data = np.flip(refscan_data, axis = 0)
-
-        return data, refscan_data, hdr
+    return data, refscan_data, hdr
     
-    except ValueError as e:
-        print(f"Error processing {raw_dat_file}: {e}")
-        return None, None, None
-
 
 def _zero_pad_along_axis(arr: np.ndarray, axis: int, target_size: int) -> np.ndarray:
     """Zero-pad an array along the specified axis to reach the target size."""
@@ -111,7 +107,7 @@ def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.nd
     patient identifier extracted from the TWIX header (``metadata['patient_id']``).
     """
 
-    twixtools = _require_twixtools()
+    import twixtools
     twix = twixtools.read_twix(str(raw_dat_file))
     mapped = twixtools.map_twix(twix)
 
@@ -128,7 +124,7 @@ def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.nd
     slice_order = get_slice_order(hdr)
     kspace = kspace[:, slice_order, ...]
     calibration = calibration[slice_order, ...]
-
+    
     if kspace.shape[2] > calibration.shape[1]:
         calibration = _zero_pad_along_axis(calibration, axis=1, target_size=kspace.shape[2])
 
