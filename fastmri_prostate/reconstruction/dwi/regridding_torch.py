@@ -49,7 +49,12 @@ def get_grid_mat(epi_params, os_factor, keep_oversampling):
         else:
             kk[zz] = (0.5/t_rampup) * torch.square(t_rampup) + (tt[zz] - t_rampup)
 
-    kk = kk - kk[int(torch.floor(torch.tensor(adc_nos/2)))-1]
+    num_samples = int(adc_nos)
+    if num_samples % 2 == 0:
+        center = 0.5 * (kk[num_samples // 2 - 1] + kk[num_samples // 2])
+    else:
+        center = kk[num_samples // 2]
+    kk = kk - center
     need_kk = torch.linspace(kk[0], kk[-1], int(i_pts_readout))
     delta_k = need_kk[1] - need_kk[0]
 
