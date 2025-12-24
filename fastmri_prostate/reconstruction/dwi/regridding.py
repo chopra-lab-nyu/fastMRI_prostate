@@ -24,8 +24,8 @@ def get_grid_mat(epi_params, os_factor, keep_oversampling):
     t_flattop = epi_params['flatTopTime']
     t_delay = epi_params['acqDelayTime']
 
-    adc_nos = 200.0
-    t_adcdur = 580.0
+    adc_nos = float(epi_params.get('destSamples') or epi_params.get('regriddestsamples') or 200.0)
+    t_adcdur = float(epi_params.get('adcDuration') or epi_params.get('regridadcduration') or 580.0)
 
     if keep_oversampling:
         i_pts_readout = adc_nos
@@ -99,4 +99,3 @@ def trapezoidal_regridding(img, epi_params):
     
     img_out = np.transpose(img_out, (2, 0, 1))
     return img_out
-

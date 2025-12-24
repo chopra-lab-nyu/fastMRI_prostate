@@ -142,6 +142,8 @@ def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.nd
         'rampDownTime': epi_params['regridrampdowntime'],
         'flatTopTime': epi_params['regridflattoptime'],
         'acqDelayTime': epi_params['regriddelaytime'],
+        'adcDuration': epi_params['regridadcduration'],
+        'destSamples': epi_params['regriddestsamples'],
         'echoSpacing': epi_params['echospacing'],
         'patient_id': patient_id,
     }
