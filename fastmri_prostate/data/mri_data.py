@@ -88,9 +88,9 @@ def _extract_epi_params(hdr: Dict) -> Dict[str, float]:
 
     config = hdr.get('Config', {})
     return {
-        'regridrampuptime': float(config.get('RampUpTime', 0.0)),
-        'regridrampdowntime': float(config.get('RampDownTime', 0.0)),
-        'regridflattoptime': float(config.get('FlatTopTime', 0.0)),
+        'regridrampuptime': float(config.get('RampupTime', 0.0)),
+        'regridrampdowntime': float(config.get('RampdownTime', 0.0)),
+        'regridflattoptime': float(config.get('FlattopTime', 0.0)),
         'regriddelaytime': float(config.get('DelaySamplesTime', 0.0)),
         'regridadcduration': float(config.get('ADCDuration', 0.0)),
         'regriddestsamples': float(config.get('DestSamples', 0.0)),

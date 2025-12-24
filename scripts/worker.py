@@ -71,7 +71,12 @@ def main() -> None:
         avg_pair = parse_average_pair(f"{raw_avg[0]}:{raw_avg[1]}")
         averaging_schemes = [(f"b50_{avg_pair[0]}_b1000_{avg_pair[1]}", avg_pair[0], avg_pair[1])]
 
-    combines = list(DEFAULT_COMBINES)
+    raw_combines = process_cfg.get("combines")
+    if raw_combines in (None, [], "all", "ALL"):
+        combines = list(DEFAULT_COMBINES)
+    else:
+        combines = [c.strip() for c in raw_combines if c.strip()]
+
     skip_metrics = bool(process_cfg["skip_metrics"])
     delete_dat = bool(process_cfg["delete_dat"])
     poll_seconds = int(process_cfg["poll_seconds"])

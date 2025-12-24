@@ -15,7 +15,7 @@ from fastmri_prostate.reconstruction.dwi.coil_combine import (
     combine_with_maps,
 )
 from fastmri_prostate.reconstruction.grappa import Grappa
-from fastmri_prostate.reconstruction.utils import flip_im, center_crop_im
+from fastmri_prostate.reconstruction.utils import flip_im, center_crop_im, ifftnd
 
 
 def _resize_maps(maps: np.ndarray, target_x: int, target_y: int) -> np.ndarray:
@@ -34,12 +34,12 @@ class DWIReconstructionResult:
     """Container for diffusion reconstruction outputs (ESC/RSS plus coil-domain data)."""
 
     images: Dict[str, np.ndarray]
-    esc_images_per_average: np.ndarray
+    esc_images_per_average: Optional[np.ndarray]
     rss_images_per_average: np.ndarray
     espirit_images_per_average: Optional[np.ndarray]
     post_grappa_coil_images: np.ndarray
     post_grappa_kspace: np.ndarray
-    kspace_esc: np.ndarray
+    kspace_esc: Optional[np.ndarray]
     kspace_by_direction: Dict[str, np.ndarray]
     direction_indices: Dict[str, np.ndarray]
 
@@ -136,13 +136,7 @@ def emulated_single_coil_slice(kspace_slice: np.ndarray) -> Tuple[np.ndarray, np
         raise ValueError("Expected kspace_slice with dims (coils, readout, phase)")
 
     kspace_batch = kspace_slice[None, ...]
-    coil_imgs = np.fft.ifftshift(
-        np.fft.ifftn(
-            np.fft.fftshift(kspace_batch, axes=(2, 3)),
-            axes=(2, 3)
-        ),
-        axes=(2, 3)
-    )
+    coil_imgs = ifftnd(kspace_batch, [2, 3])
 
     recon_rss = np.sqrt(np.sum(np.abs(coil_imgs) ** 2, axis=1))
 
@@ -205,6 +199,7 @@ def dwi_reconstruction_diffusion(
     num_b1000_averages: int = 12,
     directions: Optional[Sequence[str]] = None,
     compute_metrics: bool = True,
+    enable_esc: bool = True,
     enable_espirit: bool = True,
 ) -> DWIReconstructionResult:
     """Run GRAPPA + emulated single-coil (ESC) reconstruction.
@@ -228,21 +223,24 @@ def dwi_reconstruction_diffusion(
 
     Returns
     -------
-    DWIReconstructionResult
+        DWIReconstructionResult
         Dataclass bundle with ESC/RSS images, ESC k-space, post-GRAPPA coil-domain images and k-space,
         and direction-wise groupings.
     """
 
+    # Match oracle axis order: use phase, coil, readout for GRAPPA with coil_axis=1
     kspace_slice_regridded = trapezoidal_regridding(kspace[0, 0, ...], hdr)  # (coils, x, y)
-    grappa_obj = Grappa(kspace_slice_regridded, kernel_size=(5, 5), coil_axis=0)
+    kspace_for_grappa = np.transpose(kspace_slice_regridded, (2, 0, 1))  # (phase, coils, readout)
+    grappa_obj = Grappa(kspace_for_grappa, kernel_size=(5, 5), coil_axis=1)
 
     grappa_weight_dict = {}
     for slice_num in range(kspace.shape[1]):
         calibration_regridded = trapezoidal_regridding(calibration[slice_num, ...], hdr)
-        grappa_weight_dict[slice_num] = grappa_obj.compute_weights(calibration_regridded)
+        calib_for_grappa = np.transpose(calibration_regridded, (2, 0, 1))  # (phase, coils, readout)
+        grappa_weight_dict[slice_num] = grappa_obj.compute_weights(calib_for_grappa)
 
-    img_vol = np.zeros((kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4]), dtype=float)
-    kspace_esc_vol = np.zeros_like(img_vol, dtype=np.complex64)
+    img_vol = np.zeros((kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4]), dtype=float) if enable_esc else None
+    kspace_esc_vol = np.zeros((kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4]), dtype=np.complex64) if enable_esc else None
     post_grappa_img_vol = np.zeros(
         (kspace.shape[0], kspace.shape[1], kspace.shape[2], kspace.shape[3], kspace.shape[4]),
         dtype=np.complex64,
@@ -283,27 +281,23 @@ def dwi_reconstruction_diffusion(
     for average in range(kspace.shape[0]):
         logging.info("Average %d/%d: running ESC/RSS%s", average + 1, kspace.shape[0], " + ESPIRiT" if enable_espirit else "")
         for slice_num in range(kspace.shape[1]):
-            kspace_slice_regridded = trapezoidal_regridding(kspace[average, slice_num, ...], hdr)
+            kspace_slice_regridded = trapezoidal_regridding(kspace[average, slice_num, ...], hdr)  # (coils, x, y)
+            kspace_for_grappa = np.transpose(kspace_slice_regridded, (2, 0, 1))  # (phase, coils, readout)
             kspace_post_grappa = grappa_obj.apply_weights(
-                kspace_slice_regridded,  # (coils, x, y)
+                kspace_for_grappa,
                 grappa_weight_dict[slice_num]
-            )
+            )  # (phase, coils, readout)
 
-            # GRAPPA output is coil-first (coils, x, y)
-            kspace_coil_first = kspace_post_grappa
-            coil_domain = np.fft.ifftshift(
-                np.fft.ifftn(
-                    np.fft.fftshift(kspace_coil_first, axes=(1, 2)),
-                    axes=(1, 2),
-                ),
-                axes=(1, 2),
-            )
-            esc_kspace, _, esc_image = emulated_single_coil_slice(kspace_coil_first)
-            img_vol[average, slice_num] = esc_image
+            # Inverse FFT over phase/readout, then move coils first
+            coil_domain_phase_coil_readout = ifftnd(kspace_post_grappa, [0, 2])
+            coil_domain = np.transpose(coil_domain_phase_coil_readout, (1, 2, 0))  # (coils, readout, phase)
+            if enable_esc:
+                esc_kspace, _, esc_image = emulated_single_coil_slice(np.transpose(kspace_post_grappa, (1, 2, 0)))
+                img_vol[average, slice_num] = esc_image
+                kspace_esc_vol[average, slice_num] = esc_kspace
             rss_img_vol[average, slice_num] = np.sqrt(np.sum(np.abs(coil_domain) ** 2, axis=0))
-            kspace_esc_vol[average, slice_num] = esc_kspace
             post_grappa_img_vol[average, slice_num] = coil_domain
-            post_grappa_kspace_vol[average, slice_num] = kspace_post_grappa
+            post_grappa_kspace_vol[average, slice_num] = np.transpose(kspace_post_grappa, (1, 2, 0))
             if enable_espirit and slice_num in espirit_maps:
                 espirit_img_vol[average, slice_num] = combine_with_maps(coil_domain, espirit_maps[slice_num])
 
@@ -322,33 +316,39 @@ def dwi_reconstruction_diffusion(
             raise ValueError(f"Unknown diffusion directions requested: {invalid}")
 
     kspace_by_direction: Dict[str, np.ndarray] = {}
-    for direction in selected_directions:
-        idx = direction_indices[direction]
-        kspace_by_direction[direction] = kspace_esc_vol[idx, ...]
+    if enable_esc and kspace_esc_vol is not None:
+        for direction in selected_directions:
+            idx = direction_indices[direction]
+            kspace_by_direction[direction] = kspace_esc_vol[idx, ...]
 
-    img_dict_full = compute_averages(img_vol, num_b50_averages, num_b1000_averages)
-    required_dirs = {'b50x', 'b50y', 'b50z', 'b1000x', 'b1000y', 'b1000z'}
-    have_required = required_dirs.issubset(direction_indices.keys()) and required_dirs.issubset(set(selected_directions))
+    # Compute averages/metrics from the available magnitude volume (ESC if present, otherwise RSS)
+    img_dict: Dict[str, np.ndarray] = {}
+    magnitude_source = img_vol if img_vol is not None else rss_img_vol
+    if magnitude_source is not None:
+        img_dict_full = compute_averages(magnitude_source, num_b50_averages, num_b1000_averages)
+        required_dirs = {'b50x', 'b50y', 'b50z', 'b1000x', 'b1000y', 'b1000z'}
+        have_required = required_dirs.issubset(direction_indices.keys()) and required_dirs.issubset(set(selected_directions))
 
-    if compute_metrics and have_required:
-        img_dict_full = compute_trace_adc_b1500(img_dict_full)
-    elif compute_metrics and not have_required:
-        warnings.warn(
-            "Skipping trace/ADC/b1500 computation because not all six diffusion directions were requested.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+        if compute_metrics and have_required:
+            img_dict_full = compute_trace_adc_b1500(img_dict_full)
+        elif compute_metrics and not have_required:
+            warnings.warn(
+                "Skipping trace/ADC/b1500 computation because not all six diffusion directions were requested.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
-    selected_set = set(selected_directions)
-    img_dict = {
-        key: value
-        for key, value in img_dict_full.items()
-        if (key in selected_set) or (key not in required_dirs)
-    }
+        selected_set = set(selected_directions)
+        img_dict = {
+            key: value
+            for key, value in img_dict_full.items()
+            if (key in selected_set) or (key not in required_dirs)
+        }
 
-    center_crop_size = (100, 100)
-    for src_img in img_dict.keys():
-        img_dict[src_img] = center_crop_im(flip_im(img_dict[src_img], 0), center_crop_size)
+        # Crop to remove 2x frequency and 1.5x phase oversampling, flip for DICOM orientation
+        center_crop_size = (100, 100)
+        for src_img in img_dict.keys():
+            img_dict[src_img] = center_crop_im(flip_im(img_dict[src_img], 0), center_crop_size)
 
     return DWIReconstructionResult(
         images=img_dict,

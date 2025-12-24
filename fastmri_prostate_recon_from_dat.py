@@ -74,6 +74,7 @@ def parse_average_pair(value: str) -> Tuple[int, int]:
 
 
 def _postprocess_volume(volume: np.ndarray) -> np.ndarray:
+    """Flip and crop to remove oversampling, matching DICOM FOV."""
     processed = flip_im(volume.copy(), 0)
     processed = center_crop_im(processed, CENTER_CROP_SIZE)
     return processed.astype(np.float32)
@@ -127,6 +128,8 @@ def build_dwi_payload(
     for name in combines:
         if name == "espirit" and recon_result.espirit_images_per_average is None:
             continue
+        if name == "esc" and recon_result.esc_images_per_average is None:
+            continue
         available_combines.append(name)
     payload["metadata/combines"] = np.asarray(available_combines, dtype="S16")
 
@@ -134,7 +137,8 @@ def build_dwi_payload(
         payload[f"metadata/direction_indices/{direction}"] = recon_result.direction_indices[direction].astype(np.int16)
 
     # Shared volumes
-    payload["images/esc_full"] = recon_result.esc_images_per_average.astype(np.float32)
+    if recon_result.esc_images_per_average is not None:
+        payload["images/esc_full"] = recon_result.esc_images_per_average.astype(np.float32)
     payload["coil/post_grappa_full"] = np.abs(recon_result.post_grappa_coil_images).astype(np.float32)
     payload["kspace/post_grappa_full"] = recon_result.post_grappa_kspace.astype(np.complex64)
 
@@ -206,6 +210,7 @@ def process_dat_file(
         calibration,
         hdr,
         directions=directions,
+        enable_esc="esc" in combines,
         enable_espirit="espirit" in combines,
         compute_metrics=compute_metrics,
     )

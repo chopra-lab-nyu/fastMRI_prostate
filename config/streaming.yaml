@@ -8,9 +8,10 @@ transfer:
   max_files: 8
 
 process:
-  output_dir: /gpfs/scratch/td2105/dwi_stream/recons_v2
+  output_dir: /gpfs/scratch/td2105/dwi_stream/recons_v2_adc_fix
   directions: "all"
   averages: "all"
+  combines: ["rss", "espirit"]
   skip_metrics: false
   poll_seconds: 10
   delete_dat: false
