@@ -1,17 +1,18 @@
 transfer:
   manifest_csv: /gpfs/data/prostatelab/processed_data/csv/kspace_prostate_dwi_file_metadata.csv
   source_root: /mnt/td2105/MRIScan/Archive/yarra_rds
-  staging_dir: /gpfs/scratch/td2105/dwi_stream/staging_v2
-  max_staging_gb: 4000
+  staging_dir: /gpfs/scratch/td2105/dwi_stream/staging
+  max_staging_gb: 7000
   min_bytes: 1000000000
   poll_seconds: 30
-  max_files: 8
 
 process:
-  output_dir: /gpfs/scratch/td2105/dwi_stream/recons_v2_adc_fix
+  output_dir: /gpfs/scratch/td2105/dwi_stream/recons_rss_espirit
   directions: "all"
   averages: "all"
   combines: ["rss", "espirit"]
   skip_metrics: false
+  skip_kspace: true
+  enable_phasecorr: false
   poll_seconds: 10
-  delete_dat: false
+  delete_dat: true

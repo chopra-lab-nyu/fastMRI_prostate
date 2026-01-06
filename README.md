@@ -3,6 +3,8 @@
 [[`Paper`](https://www.nature.com/articles/s41597-024-03252-w)] [[`Dataset`](https://fastmri.med.nyu.edu/)] [[`Github`](https://github.com/cai2r/fastMRI_prostate)] [[`BibTeX`](#cite)]
 
 ### Updates
+01-06-2026: Added work-stealing parallelization for streaming workers, `--skip-kspace` flag to reduce HDF5 output size, and improved documentation.
+
 02-07-2024: Updated [files](https://github.com/cai2r/fastMRI_prostate/pull/11) for slice-, volume-, exam-level labels and their paths for T2 and Diffusion sequences in the [fastMRI prostate dataset](https://fastmri.med.nyu.edu/).
 
 [Classification](https://github.com/cai2r/fastMRI_prostate/tree/main/fastmri_prostate_classification): The classification folder contains code for training deep learning models to detect clinically significant prostate cancer.
@@ -20,106 +22,263 @@ The code requires `python >= 3.9`
 
 Install FastMRI Prostate: clone the repository locally and install with
 
-```
+```bash
 git clone https://github.com/cai2r/fastMRI_prostate.git
 cd fastmri_prostate
 pip install -e .
 ```
 
-## Internal Usage
-```fastmri_prostate_recon_from_dat.py``` contains code to read files from SEIMENS dat files and construct T2 volumes
+### Dependencies
 
-## Usage
-The repository is centered around the ```fastmri_prostate``` package. The following breaks down the basic structure:
+Core dependencies:
+- `numpy`, `scipy`, `scikit-image`
+- `h5py` - HDF5 file I/O
+- `twixtools` - Siemens `.dat` file parsing (`pip install twixtools`)
+- `torch` - Used for ESC optimization
+- `pyyaml` - Configuration file parsing
 
-```fastmri_prostate```: Contains a number of basic tools for T2 and DWI reconstruction
- - ```fastmri_prostate.data```: Provides data utility functions for accessing raw data fields like kspace, calibration, phase correction, and coil sensitivity maps.
- - ```fastmri.reconstruction.t2```: Contains functions required for prostate T2 reconstruction
- - ```fastmri.reconstruction.dwi```: Contains functions required for prostate DWI reconstruction
+For streaming pipeline:
+- `pandas` - Manifest CSV processing
 
-```fastmri_prostate_recon.py``` contains code to read files from the dataset and call the T2 and DWI reconstruction functions for a single h5 file. 
+## Quick Start
 
-```fastmri_prostate_tutorial.ipynb``` walks through an example of loading a h5 file from the fastMRI prostate dataset and reconstructing T2/DW images.
+### From fastMRI Dataset (HDF5 files)
 
-To reconstruct T2/DW images from the fastMRI prostate raw data, users can [download the dataset](https://fastmri.med.nyu.edu/) and run ```fastmri_prostate_recon.py``` with appropriate arguments, specifying the path to the root of the downloaded dataset, output path to store reconstructions, and the sequence (T2, DWI, or both).
-```
-python fastmri_prostate_recon.py \  
-    --data_path <path to dataset> \  
-    --output_path <path to store recons> \  
+```bash
+python fastmri_prostate_recon.py \
+    --data_path <path to dataset> \
+    --output_path <path to store recons> \
     --sequence <t2/dwi/both>
 ```
 
-## Streaming ESC reconstruction (internal cluster)
+### From Siemens .dat Files
 
-To process large volumes of diffusion `.dat` files directly from the research drive without staging the full dataset locally, use the streaming pipeline:
-
-```
-fastMRI_prostate/
-├── config/streaming.yaml         # central knobs for paths, throttling, recon args
-├── scripts/transfer.py           # runs on data_mover nodes, copies batches into staging
-├── scripts/worker.py             # runs on compute nodes, watches staging + reconstructs
-├── sbatch/stream_transfer.sbatch # helper submission scripts
-└── sbatch/stream_workers.sbatch
+```bash
+python fastmri_prostate_recon_from_dat.py \
+    --data-dir <directory with .dat files> \
+    --output-dir <path to store recons> \
+    --combines rss,espirit \
+    --skip-kspace
 ```
 
-### 1. Configure paths
-
-Edit `config/streaming.yaml` to point to:
-
-- `transfer.manifest_csv`: raw listing of Siemens `.dat` files (the notebook CSV). `scripts/transfer.py` contains the parsing logic (size conversion, prescan pairing, F/M sorting) to automatically pick the main acquisition corresponding to each prescan, based on a listing of all prostate diffusion dat files found on the research drive
-- `transfer.max_files`: optional cap for dry runs; set to 10–20 to validate the streaming system end-to-end before scaling up.
-- `transfer.source_root`: mounted research drive (e.g., `/mnt/td2105/MRIScan`)
-- `transfer.staging_dir`: scratch directory where `.dat` files are copied temporarily
-- `process.metadata_csv`: accession lookup CSV already used by `fastmri_prostate_recon_from_dat.py`
-- `process.output_dir`: final location for `.h5` reconstructions
-
-### 2. Launch transfer job on a data_mover node
+## Package Structure
 
 ```
-sbatch sbatch/stream_transfer.sbatch
+fastmri_prostate/
+├── data/
+│   └── mri_data.py              # Data loading utilities (HDF5, .dat files)
+├── reconstruction/
+│   ├── grappa.py                # GRAPPA parallel imaging reconstruction
+│   ├── utils.py                 # FFT, cropping, flipping utilities
+│   ├── t2/                      # T2-weighted reconstruction
+│   └── dwi/                     # Diffusion-weighted reconstruction
+│       ├── prostate_dwi_recon.py    # Main DWI reconstruction pipeline
+│       ├── coil_combine.py          # ESPIRiT and coil combination
+│       ├── diffusion_metrics.py     # ADC, trace, b1500 computation
+│       └── regridding.py            # EPI trajectory correction
+└── visualization/               # Plotting utilities
 ```
 
-This script runs `scripts/transfer.py`, which:
+## DWI Reconstruction Pipeline
 
-1. Reads the manifest CSV and filters out tiny files
-2. Parses Siemens filename metadata, pairs each main scan with its nearest prescan (<=5 min difference, matching scanner site), and keeps the best match per study
-3. Applies the optional `max_files` limit (if set) so you can run small validation batches
-4. Copies the resulting list of main `.dat` files incrementally from the CIFS/SMB mount to the staging directory
-3. Drops a `.dat.ready` marker once each file is copied
-4. Keeps a `.transfer_active` flag while work remains (used by workers to know when to exit)
+The DWI reconstruction pipeline (`fastmri_prostate_recon_from_dat.py`) performs:
 
-The copy loop throttles itself when staging exceeds `max_staging_gb` to avoid filling scratch.
+1. **Trapezoidal regridding** - Corrects for EPI readout trajectory
+2. **GRAPPA reconstruction** - Fills missing k-space lines using calibration data
+3. **Coil combination** - Multiple methods available:
+   - `rss` - Root sum-of-squares (fast, no calibration needed)
+   - `espirit` - ESPIRiT sensitivity maps (better SNR, requires calibration)
+   - `esc` - Emulated single coil (optimized weighted combination)
+4. **Diffusion averaging** - Combines multiple averages per b-value/direction
+5. **Metric computation** - ADC maps, trace images, synthetic b1500
 
-### 3. Launch reconstruction workers on CPU partitions
+### Command Line Options
+
+```bash
+python fastmri_prostate_recon_from_dat.py \
+    --data-dir <input directory> \
+    --output-dir <output directory> \
+    --directions b50x,b50y,b50z,b1000x,b1000y,b1000z \
+    --combines rss,espirit \
+    --skip-metrics \
+    --skip-kspace \
+    --enable-phasecorr \
+    --max-files 10 \
+    --job-index 0 \
+    --job-count 1
+```
+
+| Flag | Description |
+|------|-------------|
+| `--directions` | Comma-separated diffusion directions (default: all 6) |
+| `--combines` | Coil combination methods: `rss`, `espirit`, `esc` |
+| `--skip-metrics` | Skip ADC/trace/b1500 computation |
+| `--skip-kspace` | Don't store k-space in output (saves ~90% disk space) |
+| `--enable-phasecorr` | Apply odd/even EPI phase correction |
+| `--max-files` | Limit number of files to process |
+| `--job-index/count` | For parallel processing across multiple jobs |
+
+### Output HDF5 Structure
 
 ```
-sbatch sbatch/stream_workers.sbatch
+output.h5
+├── metadata/
+│   ├── directions          # List of diffusion directions
+│   ├── averaging_schemes   # Averaging configurations
+│   └── combines            # Coil combination methods used
+├── images/
+│   ├── rss/
+│   │   ├── per_average/{direction}     # Per-average images
+│   │   └── b50_4_b1000_12/{direction}  # Averaged images
+│   └── espirit/
+│       └── ...
+├── metrics/
+│   └── {combine}/{scheme}/
+│       ├── adc_map
+│       ├── b1500
+│       ├── trace_b50
+│       └── trace_b1000
+└── kspace/                 # Only if --skip-kspace not set
+    └── post_grappa_full
 ```
 
-This submits a SLURM array (defaults to 16 workers). Each worker:
+### Output Size Estimates
 
+| Configuration | Size per scan |
+|--------------|---------------|
+| Full output (with k-space) | ~20 GB |
+| `--skip-kspace` | ~0.7 GB |
+
+## Streaming Pipeline (HPC Clusters)
+
+For processing large volumes of `.dat` files on HPC clusters with SLURM, use the streaming pipeline which coordinates file transfer and parallel reconstruction.
+
+### Architecture
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  Research Drive │────▶│  Staging Dir     │────▶│  Output Dir     │
+│  (source_root)  │     │  (.dat + .ready) │     │  (.h5 files)    │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+        │                        │
+   transfer.py              worker.py (×N)
+   (data_mover)             (CPU nodes)
+```
+
+### Configuration (`config/streaming.yaml`)
+
+```yaml
+transfer:
+  manifest_csv: /path/to/file_list.csv    # CSV with 'path' and 'size' columns
+  source_root: /mnt/research_drive        # Mount point for source files
+  staging_dir: /scratch/staging           # Temporary staging directory
+  max_staging_gb: 500                     # Throttle when staging exceeds this
+  min_bytes: 1000000000                   # Skip files smaller than 1GB
+  poll_seconds: 30                        # Transfer polling interval
+
+process:
+  output_dir: /scratch/output             # Final HDF5 output location
+  directions: "all"                       # Or list: ["b50x", "b1000x", ...]
+  averages: "all"                         # Or pair: [4, 12] for b50/b1000
+  combines: ["rss", "espirit"]            # Coil combination methods
+  skip_metrics: false                     # Compute ADC/trace/b1500
+  skip_kspace: true                       # Don't store k-space (recommended)
+  enable_phasecorr: false                 # EPI phase correction
+  poll_seconds: 10                        # Worker polling interval
+  delete_dat: true                        # Delete .dat after successful recon
+```
+
+### Running the Pipeline
+
+**Step 1: Start workers first** (they'll wait for files)
+```bash
+sbatch sbatch/stream_workers.sh
+```
+
+**Step 2: Start transfer**
+```bash
+sbatch sbatch/stream_transfer.sh
+```
+
+### How It Works
+
+**Transfer Script (`scripts/transfer.py`):**
+1. Reads manifest CSV and filters by size
+2. Parses Siemens filename metadata to pair main scans with prescans
+3. Copies files to staging, creates `.ready` marker after each copy
+4. Maintains `.copied_manifest.json` to track progress (resumable)
+5. Throttles when staging exceeds `max_staging_gb`
+6. Sets `.transfer_active` flag while running
+
+**Worker Script (`scripts/worker.py`):**
 1. Watches for `*.dat.ready` markers in staging
-2. Claims a file via a `.lock` directory to prevent duplicate processing
-3. Calls `fastmri_prostate_recon_from_dat.py` helpers to reconstruct the file
-4. Writes the `.h5` to `process.output_dir` and deletes the `.dat` once successful
+2. Uses **work-stealing**: any worker can grab any unlocked file
+3. Claims files via atomic `mkdir()` lock (prevents duplicate processing)
+4. Processes file → writes `.h5` → deletes `.dat` and markers
+5. Exits when transfer inactive and no files remain
 
-Workers sleep for `process.poll_seconds` (default 10 s) when no files are available but transfers are still active. They exit automatically after the transfer job clears the active flag and staging is empty.
+### Worker Coordination
 
-### 4. Monitor and resume
+Workers use a work-stealing pattern for optimal load balancing:
+- No static assignment - any worker processes any available file
+- Atomic locking via `mkdir()` prevents race conditions
+- Random shuffling reduces lock contention
+- Workers stay busy as long as work is available
 
-- Logs: `logs_streaming/*.out`
-- Resume: rerun `stream_transfer.sbatch`; already copied files are skipped thanks to `.copied_manifest.json`
-- Cleanup: staging remains empty except for in-flight files; failed jobs keep their `.dat`/`.ready` for inspection
+### SLURM Resource Recommendations
 
-This layout keeps the workflow reproducible, debuggable, and easy to operate within a single workday.
+| Coil Combines | Memory | CPUs | Notes |
+|---------------|--------|------|-------|
+| RSS only | 32G | 4 | Fastest, minimal memory |
+| RSS + ESPIRiT | 48G | 6 | ESPIRiT SVD is memory-intensive |
+| RSS + ESPIRiT + ESC | 64G | 8 | ESC optimization adds overhead |
+
+### Monitoring
+
+```bash
+# Check worker status
+squeue -u $USER | grep dwi
+
+# Watch staging directory
+watch -n 5 'ls /scratch/staging/*.ready 2>/dev/null | wc -l'
+
+# Tail worker logs
+tail -f logs_streaming/dwi_stream_*.err
+
+# Count completed reconstructions
+ls /scratch/output/*.h5 | wc -l
+```
+
+### Troubleshooting
+
+**Workers idle but files exist:**
+- Check for `.ready` markers: `ls staging/*.ready`
+- If missing, create them: `for f in staging/*.dat; do touch "${f}.ready"; done`
+
+**Resume after failure:**
+- Transfer automatically skips files in `.copied_manifest.json`
+- To reprocess: remove file from manifest or delete manifest
+
+**Clear staging for fresh start:**
+```bash
+rm staging/*.dat staging/*.ready staging/*.failed
+echo '{"files": []}' > staging/.copied_manifest.json
+```
 
 ## Hardware Requirements
-The reconstruction algorithms implemented in this package requires the following hardware:
-- A computer with at least 32GB of RAM
-- A multi-core CPU
 
-### Run Time
-The run time of a single T2 reconstruction takes ~15 minutes while the Diffusion Weighted reconstructions take ~7 minutes on a multi-core CPU Linux machine with 64GB RAM. A bulk of the time is spent in applying GRAPPA weights to the undersampled raw kspace data.
+- **Memory:** 32-64 GB RAM depending on coil combination methods
+- **CPU:** Multi-core recommended (reconstruction is CPU-bound)
+- **Storage:** ~0.7 GB per scan with `--skip-kspace`, ~20 GB without
+
+### Runtime
+
+| Sequence | Time per scan |
+|----------|---------------|
+| T2 | ~15 minutes |
+| DWI (RSS only) | ~5 minutes |
+| DWI (RSS + ESPIRiT) | ~7 minutes |
+| DWI (RSS + ESPIRiT + ESC) | ~10 minutes |
 
 ## License
 fastMRI_prostate is MIT licensed, as found in [LICENSE file](https://github.com/cai2r/fastMRI_prostate/blob/main/LICENSE)
@@ -127,7 +286,7 @@ fastMRI_prostate is MIT licensed, as found in [LICENSE file](https://github.com/
 ## Cite
 If you use the fastMRI Prostate data or code in your research, please use the following BibTeX entry.
 
-```
+```bibtex
 @article{tibrewala2024fastmri,
   title={FastMRI Prostate: A public, biparametric MRI dataset to advance machine learning for prostate cancer imaging},
   author={Tibrewala, Radhika and Dutt, Tarun and Tong, Angela and Ginocchio, Luke and Lattanzi, Riccardo and Keerthivasan, Mahesh B and Baete, Steven H and Chopra, Sumit and Lui, Yvonne W and Sodickson, Daniel K and others},
@@ -140,5 +299,5 @@ If you use the fastMRI Prostate data or code in your research, please use the fo
 }
 ```
 
-## Acknowedgements
+## Acknowledgements
 The code for the GRAPPA technique was based off [pygrappa](https://github.com/mckib2/pygrappa), and ESPIRiT maps provided in the dataset were computed using [espirit-python](https://github.com/mikgroup/espirit-python) 

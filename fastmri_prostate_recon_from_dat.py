@@ -118,6 +118,7 @@ def build_dwi_payload(
     averaging_schemes: Sequence[Tuple[str, int, int]],
     compute_metrics: bool,
     combines: Sequence[str],
+    store_kspace: bool = True,
 ) -> dict[str, np.ndarray]:
     payload: dict[str, np.ndarray] = {}
 
@@ -139,8 +140,8 @@ def build_dwi_payload(
     # Shared volumes
     if recon_result.esc_images_per_average is not None:
         payload["images/esc_full"] = recon_result.esc_images_per_average.astype(np.float32)
-    payload["coil/post_grappa_full"] = np.abs(recon_result.post_grappa_coil_images).astype(np.float32)
-    payload["kspace/post_grappa_full"] = recon_result.post_grappa_kspace.astype(np.complex64)
+    if store_kspace:
+        payload["kspace/post_grappa_full"] = recon_result.post_grappa_kspace.astype(np.complex64)
 
     combine_sources = {}
     if "esc" in available_combines:
@@ -157,7 +158,7 @@ def build_dwi_payload(
             )
 
         # ESC gets single-coil k-space per direction
-        if combine_name == "esc":
+        if combine_name == "esc" and store_kspace:
             for direction in directions:
                 payload[f"kspace/esc/{direction}"] = recon_result.get_esc_direction_kspace(direction).astype(np.complex64)
 
@@ -184,8 +185,14 @@ def process_dat_file(
     output_dir: Path,
     skip_metrics: bool,
     combines: Sequence[str],
+    enable_phasecorr: bool,
+    store_kspace: bool = True,
 ) -> Path:
-    kspace, calibration, hdr = load_dat_file_dwi(dat_file)
+    phasecorr = None
+    if enable_phasecorr:
+        kspace, calibration, hdr, phasecorr = load_dat_file_dwi(dat_file, include_phasecorr=True)
+    else:
+        kspace, calibration, hdr = load_dat_file_dwi(dat_file)
 
     avg_count = kspace.shape[0]
     if avg_count not in VALID_AVERAGE_COUNTS:
@@ -209,13 +216,15 @@ def process_dat_file(
         kspace,
         calibration,
         hdr,
+        phasecorr=phasecorr,
         directions=directions,
         enable_esc="esc" in combines,
         enable_espirit="espirit" in combines,
         compute_metrics=compute_metrics,
+        enable_phasecorr=enable_phasecorr,
     )
 
-    payload = build_dwi_payload(recon_result, directions, averaging_schemes, compute_metrics, combines)
+    payload = build_dwi_payload(recon_result, directions, averaging_schemes, compute_metrics, combines, store_kspace)
     base_stem = dat_file.stem
     output_name = f"{base_stem}__{patient_id}.h5"
     output_path = output_dir / output_name
@@ -275,7 +284,16 @@ def main() -> None:
     for dat_file in assigned_files:
         logging.info("Processing %s", dat_file.name)
         try:
-            output_path = process_dat_file(dat_file, directions, averaging_schemes, output_dir, args.skip_metrics, combines)
+            output_path = process_dat_file(
+                dat_file,
+                directions,
+                averaging_schemes,
+                output_dir,
+                args.skip_metrics,
+                combines,
+                args.enable_phasecorr,
+                store_kspace=not args.skip_kspace,
+            )
         except Exception:  # noqa: BLE001
             logging.exception("Failed to reconstruct %s", dat_file.name)
             continue
@@ -317,6 +335,16 @@ def parse_args() -> argparse.Namespace:
         "--skip-metrics",
         action="store_true",
         help="Skip computing trace/ADC/b1500 maps",
+    )
+    parser.add_argument(
+        "--skip-kspace",
+        action="store_true",
+        help="Skip storing k-space data in HDF5 output (saves significant disk space)",
+    )
+    parser.add_argument(
+        "--enable-phasecorr",
+        action="store_true",
+        help="Apply odd/even EPI phase correction using TWIX phasecorr data",
     )
     parser.add_argument(
         "--job-index",

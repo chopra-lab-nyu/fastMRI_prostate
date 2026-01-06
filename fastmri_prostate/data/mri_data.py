@@ -100,11 +100,16 @@ def _extract_epi_params(hdr: Dict) -> Dict[str, float]:
     }
 
 
-def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+def load_dat_file_dwi(
+    raw_dat_file: Union[str, Path],
+    include_phasecorr: bool = False,
+) -> Tuple:
     """Load Siemens diffusion `.dat` file and return k-space, calibration, and metadata.
 
     The metadata dictionary contains the trapezoidal regridding parameters and the
     patient identifier extracted from the TWIX header (``metadata['patient_id']``).
+    When ``include_phasecorr`` is True, the phase correction navigator data is
+    returned as the final tuple element.
     """
 
     import twixtools
@@ -120,10 +125,31 @@ def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.nd
 
     kspace = im_data[:].squeeze()
     calibration = refscan[:].squeeze()
+    phasecorr = None
+    if include_phasecorr:
+        pc = mapped[-1]['phasecorr']
+        pc.flags['remove_os'] = False
+        pc.flags['average']['Ave'] = False
+        phasecorr = pc[:]
+        dims = list(pc.dims)
+        if "Ave" in dims:
+            ave_idx = dims.index("Ave")
+            if phasecorr.shape[ave_idx] > 1:
+                phasecorr = phasecorr.mean(axis=ave_idx)
+            else:
+                phasecorr = np.take(phasecorr, 0, axis=ave_idx)
+            dims.pop(ave_idx)
+        required = ["Rep", "Sli", "Cha", "Col", "Lin"]
+        axes = [dims.index(name) for name in required]
+        phasecorr = np.moveaxis(phasecorr, axes, range(len(required)))
+        while phasecorr.ndim > len(required):
+            phasecorr = phasecorr[..., 0]
 
     slice_order = get_slice_order(hdr)
     kspace = kspace[:, slice_order, ...]
     calibration = calibration[slice_order, ...]
+    if include_phasecorr:
+        phasecorr = phasecorr[:, slice_order, ...]
     
     if kspace.shape[2] > calibration.shape[1]:
         calibration = _zero_pad_along_axis(calibration, axis=1, target_size=kspace.shape[2])
@@ -131,6 +157,8 @@ def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.nd
     # Reorder to match reconstruction expectations
     kspace = np.transpose(kspace, (0, 1, 3, 4, 2)).copy()
     calibration = np.transpose(calibration, (0, 2, 3, 1)).copy()
+    if include_phasecorr:
+        phasecorr = phasecorr.copy()
 
     epi_params = _extract_epi_params(hdr)
     patient_id = hdr.get('Config', {}).get('PatientID') if isinstance(hdr, dict) else None
@@ -148,6 +176,8 @@ def load_dat_file_dwi(raw_dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.nd
         'patient_id': patient_id,
     }
 
+    if include_phasecorr:
+        return kspace, calibration, regrid_params, phasecorr
     return kspace, calibration, regrid_params
 
 

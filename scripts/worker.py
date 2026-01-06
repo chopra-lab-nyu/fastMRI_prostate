@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import logging
+import random
 import time
 from pathlib import Path
 
@@ -29,6 +29,7 @@ def prepare_logger(level: str) -> None:
 
 
 def acquire_lock(dat_file: Path) -> Path | None:
+    """Attempt to acquire exclusive lock on a dat file using atomic mkdir."""
     lock_dir = dat_file.with_suffix(dat_file.suffix + LOCK_EXT)
     try:
         lock_dir.mkdir()
@@ -37,16 +38,10 @@ def acquire_lock(dat_file: Path) -> Path | None:
         return None
 
 
-def shard_owner(name: str, worker_count: int) -> int:
-    digest = hashlib.md5(name.encode("utf-8"))
-    return int(digest.hexdigest(), 16) % worker_count
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Watch staging directory and run ESC reconstruction")
     parser.add_argument("--config", default="config/streaming.yaml")
-    parser.add_argument("--worker-id", type=int, required=True)
-    parser.add_argument("--worker-count", type=int, required=True)
+    parser.add_argument("--worker-id", type=int, required=True, help="Unique ID for this worker (for logging)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -78,25 +73,26 @@ def main() -> None:
         combines = [c.strip() for c in raw_combines if c.strip()]
 
     skip_metrics = bool(process_cfg["skip_metrics"])
+    skip_kspace = bool(process_cfg.get("skip_kspace", False))
+    enable_phasecorr = bool(process_cfg.get("enable_phasecorr", False))
     delete_dat = bool(process_cfg["delete_dat"])
     poll_seconds = int(process_cfg["poll_seconds"])
 
     logging.info(
-        "Worker %d/%d ready (staging=%s, output=%s)",
+        "Worker %d ready (staging=%s, output=%s)",
         args.worker_id,
-        args.worker_count,
         staging,
         output_dir,
     )
 
     while True:
-        ready_files = sorted(staging.glob(f"*{READY_EXT}"))
+        ready_files = list(staging.glob(f"*{READY_EXT}"))
+        random.shuffle(ready_files)  # Reduce lock contention across workers
         claimed = False
 
         for marker in ready_files:
             dat_file = marker.with_suffix("")  # drop .ready
-            if shard_owner(dat_file.name, args.worker_count) != args.worker_id:
-                continue
+            # Work-stealing: any worker can grab any unlocked file
             lock_dir = acquire_lock(dat_file)
             if lock_dir is None:
                 continue
@@ -111,6 +107,8 @@ def main() -> None:
                     output_dir=output_dir,
                     skip_metrics=skip_metrics,
                     combines=combines,
+                    enable_phasecorr=enable_phasecorr,
+                    store_kspace=not skip_kspace,
                 )
             except UnsupportedAverageCountError as exc:
                 logging.warning("%s; removing ready marker", exc)

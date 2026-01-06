@@ -29,6 +29,64 @@ def _resize_maps(maps: np.ndarray, target_x: int, target_y: int) -> np.ndarray:
     return real + 1j * imag
 
 
+def _estimate_phasecorr_correction(
+    phasecorr_slice: np.ndarray,
+    center_width: int = 24,
+) -> Optional[np.ndarray]:
+    """Estimate odd/even EPI phase correction from phasecorr data."""
+
+    nphase = phasecorr_slice.shape[-1]
+    if nphase < 2:
+        return None
+
+    width = min(center_width, nphase)
+    if width < 2:
+        return None
+
+    start = (nphase - width) // 2
+    end = start + width
+    region = phasecorr_slice[..., start:end]
+    idx = np.arange(start, end)
+    even_mask = (idx % 2) == 0
+    odd_mask = ~even_mask
+
+    even_lines = region[..., even_mask]
+    odd_lines = region[..., odd_mask]
+    if even_lines.size == 0 or odd_lines.size == 0:
+        return None
+
+    even_sum = np.sum(even_lines, axis=(0, -1))
+    odd_sum = np.sum(odd_lines, axis=(0, -1))
+    phase = np.angle(odd_sum * np.conj(even_sum))
+    phase = np.unwrap(phase, axis=-1)
+    weights = np.abs(odd_sum) + np.abs(even_sum)
+
+    readout = phase.shape[-1]
+    x = np.arange(readout, dtype=np.float64)
+    phase_fit = np.zeros_like(phase, dtype=np.float64)
+    for coil in range(phase.shape[0]):
+        w = weights[coil]
+        if np.all(w == 0):
+            coeffs = np.polyfit(x, phase[coil], 1)
+        else:
+            coeffs = np.polyfit(x, phase[coil], 1, w=w)
+        phase_fit[coil] = coeffs[0] * x + coeffs[1]
+
+    return np.exp(1j * phase_fit).astype(np.complex64)
+
+
+def _apply_phasecorr(
+    kspace_phase_coil_readout: np.ndarray,
+    correction: Optional[np.ndarray],
+) -> None:
+    """Apply odd/even phase correction in place (align even lines to odd)."""
+
+    if correction is None:
+        return
+    even_mask = (np.arange(kspace_phase_coil_readout.shape[0]) % 2) == 0
+    kspace_phase_coil_readout[even_mask, ...] *= correction[None, ...]
+
+
 @dataclass
 class DWIReconstructionResult:
     """Container for diffusion reconstruction outputs (ESC/RSS plus coil-domain data)."""
@@ -195,12 +253,15 @@ def dwi_reconstruction_diffusion(
     kspace: np.ndarray,
     calibration: np.ndarray,
     hdr: Dict,
+    phasecorr: Optional[np.ndarray] = None,
     num_b50_averages: int = 4,
     num_b1000_averages: int = 12,
     directions: Optional[Sequence[str]] = None,
     compute_metrics: bool = True,
     enable_esc: bool = True,
     enable_espirit: bool = True,
+    enable_phasecorr: bool = False,
+    phasecorr_center_width: int = 24,
 ) -> DWIReconstructionResult:
     """Run GRAPPA + emulated single-coil (ESC) reconstruction.
 
@@ -212,6 +273,8 @@ def dwi_reconstruction_diffusion(
         Fully-sampled calibration data with shape (slices, coils, readout, phase).
     hdr : Dict
         Acquisition header dictionary required for trapezoidal regridding.
+    phasecorr : np.ndarray, optional
+        Phase correction navigator data with shape (averages, slices, coils, readout, phase).
     num_b50_averages : int, optional
         Number of b50 averages used when generating mean images.
     num_b1000_averages : int, optional
@@ -220,6 +283,10 @@ def dwi_reconstruction_diffusion(
         Subset of diffusion directions to keep in the outputs. Defaults to all available directions.
     compute_metrics : bool, optional
         Whether to compute trace/ADC/b1500 maps (requires all six diffusion directions).
+    enable_phasecorr : bool, optional
+        Whether to apply odd/even EPI phase correction using phasecorr data.
+    phasecorr_center_width : int, optional
+        Number of central phase-encode lines used to estimate the correction.
 
     Returns
     -------
@@ -234,9 +301,24 @@ def dwi_reconstruction_diffusion(
     grappa_obj = Grappa(kspace_for_grappa, kernel_size=(5, 5), coil_axis=1)
 
     grappa_weight_dict = {}
+    phasecorr_corrections: Dict[int, Optional[np.ndarray]] = {}
+    if enable_phasecorr:
+        if phasecorr is None:
+            raise ValueError("enable_phasecorr=True requires phasecorr data.")
+        if phasecorr.shape[1] != kspace.shape[1]:
+            raise ValueError("Phasecorr slice count does not match kspace slices.")
+        for slice_num in range(kspace.shape[1]):
+            phasecorr_slice = phasecorr[:, slice_num, ...]
+            phasecorr_corrections[slice_num] = _estimate_phasecorr_correction(
+                phasecorr_slice,
+                center_width=phasecorr_center_width,
+            )
+
     for slice_num in range(kspace.shape[1]):
         calibration_regridded = trapezoidal_regridding(calibration[slice_num, ...], hdr)
         calib_for_grappa = np.transpose(calibration_regridded, (2, 0, 1))  # (phase, coils, readout)
+        if enable_phasecorr:
+            _apply_phasecorr(calib_for_grappa, phasecorr_corrections.get(slice_num))
         grappa_weight_dict[slice_num] = grappa_obj.compute_weights(calib_for_grappa)
 
     img_vol = np.zeros((kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4]), dtype=float) if enable_esc else None
@@ -255,20 +337,26 @@ def dwi_reconstruction_diffusion(
         logging.info("Precomputing ESPIRiT maps for %d slices", kspace.shape[1])
         for slice_num in range(kspace.shape[1]):
             calibration_regridded = trapezoidal_regridding(calibration[slice_num, ...], hdr)
+            if enable_phasecorr:
+                correction = phasecorr_corrections.get(slice_num)
+                if correction is not None:
+                    calib_for_phase = np.transpose(calibration_regridded, (2, 0, 1))
+                    _apply_phasecorr(calib_for_phase, correction)
+                    calibration_regridded = np.transpose(calib_for_phase, (1, 2, 0))
             calib_coil_first = calibration_regridded  # already (coils, x, y)
             raw_maps = espirit_maps_from_calib(calib_coil_first)
             espirit_maps[slice_num] = _resize_maps(raw_maps, kspace.shape[3], kspace.shape[4])
-            logging.info(
-                "  Slice %d: ESPIRiT map shape %s -> resized to (%d, %d, %d)",
-                slice_num,
-                raw_maps.shape,
-                espirit_maps[slice_num].shape[0],
-                espirit_maps[slice_num].shape[1],
-                espirit_maps[slice_num].shape[2],
-            )
+            if slice_num % 5 == 0 or slice_num == kspace.shape[1] - 1:
+                logging.info(
+                    "  Slice %d: ESPIRiT map shape %s -> resized to (%d, %d, %d)",
+                    slice_num,
+                    raw_maps.shape,
+                    espirit_maps[slice_num].shape[0],
+                    espirit_maps[slice_num].shape[1],
+                    espirit_maps[slice_num].shape[2],
+                )
         logging.info("Finished ESPIRiT map precompute")
-        for key in espirit_maps:
-            logging.info("  Slice %d: found %s ESPIRiT maps", key, str(espirit_maps[key].shape))
+        logging.info("  ESPIRiT maps cached for %d slices", len(espirit_maps))
 
     logging.info(
         "Starting reconstruction: shape %s interpreted as (averages, slices, coils=%d, x=%d, y=%d)",
@@ -279,10 +367,13 @@ def dwi_reconstruction_diffusion(
     )
 
     for average in range(kspace.shape[0]):
-        logging.info("Average %d/%d: running ESC/RSS%s", average + 1, kspace.shape[0], " + ESPIRiT" if enable_espirit else "")
+        if average % 5 == 0:
+            logging.info("Average %d/%d: running ESC/RSS%s", average + 1, kspace.shape[0], " + ESPIRiT" if enable_espirit else "")
         for slice_num in range(kspace.shape[1]):
             kspace_slice_regridded = trapezoidal_regridding(kspace[average, slice_num, ...], hdr)  # (coils, x, y)
             kspace_for_grappa = np.transpose(kspace_slice_regridded, (2, 0, 1))  # (phase, coils, readout)
+            if enable_phasecorr:
+                _apply_phasecorr(kspace_for_grappa, phasecorr_corrections.get(slice_num))
             kspace_post_grappa = grappa_obj.apply_weights(
                 kspace_for_grappa,
                 grappa_weight_dict[slice_num]

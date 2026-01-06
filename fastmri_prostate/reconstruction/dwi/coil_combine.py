@@ -33,7 +33,7 @@ def espirit(X: np.ndarray, k: int, r: int, t: float, c: float) -> np.ndarray:
     sz = np.shape(X)[2]
     nc = np.shape(X)[3]
     
-    logging.info("ESPIRiT: input shape (%d, %d, %d, %d), kernel=%d, calib=%d", sx, sy, sz, nc, k, r)
+    logging.debug("ESPIRiT: input shape (%d, %d, %d, %d), kernel=%d, calib=%d", sx, sy, sz, nc, k, r)
 
     sxt = (sx // 2 - r // 2, sx // 2 + r // 2) if (sx > 1) else (0, 1)
     syt = (sy // 2 - r // 2, sy // 2 + r // 2) if (sy > 1) else (0, 1)
@@ -41,7 +41,7 @@ def espirit(X: np.ndarray, k: int, r: int, t: float, c: float) -> np.ndarray:
 
     # Extract calibration region.
     C = X[sxt[0]:sxt[1], syt[0]:syt[1], szt[0]:szt[1], :].astype(np.complex64)
-    logging.info("ESPIRiT: calibration region shape %s", C.shape)
+    logging.debug("ESPIRiT: calibration region shape %s", C.shape)
 
     # Construct Hankel matrix.
     p = (sx > 1) + (sy > 1) + (sz > 1)
@@ -56,7 +56,7 @@ def espirit(X: np.ndarray, k: int, r: int, t: float, c: float) -> np.ndarray:
                 A[idx, :] = block.flatten()
                 idx = idx + 1
     
-    logging.info("ESPIRiT: Hankel matrix shape %s, computing SVD...", A.shape)
+    logging.debug("ESPIRiT: Hankel matrix shape %s, computing SVD...", A.shape)
 
     # Take the Singular Value Decomposition.
     U, S, VH = np.linalg.svd(A, full_matrices=True)
@@ -65,7 +65,7 @@ def espirit(X: np.ndarray, k: int, r: int, t: float, c: float) -> np.ndarray:
     # Select kernels.
     n = np.sum(S >= t * S[0])
     V = V[:, 0:n]
-    logging.info("ESPIRiT: selected %d kernels from SVD", n)
+    logging.debug("ESPIRiT: selected %d kernels from SVD", n)
 
     kxt = (sx // 2 - k // 2, sx // 2 + k // 2) if (sx > 1) else (0, 1)
     kyt = (sy // 2 - k // 2, sy // 2 + k // 2) if (sy > 1) else (0, 1)
@@ -78,7 +78,7 @@ def espirit(X: np.ndarray, k: int, r: int, t: float, c: float) -> np.ndarray:
         kernels[kxt[0]:kxt[1], kyt[0]:kyt[1], kzt[0]:kzt[1], :, idx] = np.reshape(V[:, idx], kerdims)
 
     # Take the iucfft
-    logging.info("ESPIRiT: computing kernel images...")
+    logging.debug("ESPIRiT: computing kernel images...")
     axes = (0, 1, 2)
     kerimgs = np.zeros(np.append(np.shape(X), n)).astype(np.complex64)
     for idx in range(n):
@@ -87,7 +87,7 @@ def espirit(X: np.ndarray, k: int, r: int, t: float, c: float) -> np.ndarray:
             kerimgs[:, :, :, jdx, idx] = _fft(ker, axes) * np.sqrt(sx * sy * sz) / np.sqrt(k ** p)
 
     # Take the point-wise eigenvalue decomposition and keep eigenvalues greater than c
-    logging.info("ESPIRiT: computing point-wise eigenvalue decomposition (%d x %d x %d pixels)...", sx, sy, sz)
+    logging.debug("ESPIRiT: computing point-wise eigenvalue decomposition (%d x %d x %d pixels)...", sx, sy, sz)
     maps = np.zeros(np.append(np.shape(X), nc)).astype(np.complex64)
     total_pixels = sx * sy * sz
     pixel_count = 0
@@ -110,9 +110,9 @@ def espirit(X: np.ndarray, k: int, r: int, t: float, c: float) -> np.ndarray:
                 
                 pixel_count += 1
                 if pixel_count % log_interval == 0:
-                    logging.info("ESPIRiT: eigenvalue decomposition %d%% complete", int(100 * pixel_count / total_pixels))
+                    logging.debug("ESPIRiT: eigenvalue decomposition %d%% complete", int(100 * pixel_count / total_pixels))
     
-    logging.info("ESPIRiT: completed, output maps shape %s", maps.shape)
+    logging.debug("ESPIRiT: completed, output maps shape %s", maps.shape)
     return maps
 
 
