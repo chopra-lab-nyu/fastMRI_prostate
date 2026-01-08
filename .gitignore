@@ -133,7 +133,6 @@ logs/
 varnet/
 
 # bash files
-*.sh
-sbatch/
+sbatch/logs*/
 *logs*/
 fastmri_prostate_debug.ipynb
