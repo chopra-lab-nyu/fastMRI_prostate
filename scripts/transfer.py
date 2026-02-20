@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import logging
 import re
@@ -165,7 +166,25 @@ def build_main_manifest(csv_path: Path, min_bytes: int, max_files: int | None = 
 
 
 def staging_size_bytes(staging: Path) -> int:
-    return sum(file.stat().st_size for file in staging.glob("**/*") if file.is_file())
+    """Return total bytes in staging, handling race conditions with workers."""
+    total = 0
+
+    def _onerror(err: OSError) -> None:
+        if isinstance(err, FileNotFoundError):
+            return
+        raise err
+
+    for root, dirs, files in os.walk(staging, onerror=_onerror):
+        # Avoid transient lock directories while workers are running.
+        dirs[:] = [d for d in dirs if not d.endswith(".lock")]
+        root_path = Path(root)
+        for name in files:
+            try:
+                total += (root_path / name).stat().st_size
+            except (FileNotFoundError, OSError):
+                # File was deleted by worker between listing and stat - skip it
+                continue
+    return total
 
 
 def copy_file(src: Path, dest: Path) -> None:

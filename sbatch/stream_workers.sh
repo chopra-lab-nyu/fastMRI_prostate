@@ -3,7 +3,7 @@
 #SBATCH --time=6-00:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --array=0-40
+#SBATCH --array=0-20
 #SBATCH --job-name=dwi_stream
 #SBATCH --output=logs_streaming/%x_%A_%a.out
 #SBATCH --error=logs_streaming/%x_%A_%a.err
