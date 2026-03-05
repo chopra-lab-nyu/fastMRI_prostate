@@ -29,6 +29,22 @@ def _require_twixtools():
     return twixtools
 
 
+def _read_twix_with_pmu_fallback(raw_dat_file: Union[str, Path]):
+    """Read TWIX data and retry without PMU parsing on known PMU decode errors."""
+
+    twixtools = _require_twixtools()
+    path = str(raw_dat_file)
+    try:
+        return twixtools.read_twix(path, verbose=False)
+    except struct.error as exc:
+        logging.warning(
+            "PMU parsing failed for %s (%s); retrying with parse_pmu=False.",
+            path,
+            exc,
+        )
+        return twixtools.read_twix(path, parse_pmu=False, verbose=False)
+
+
 def load_dat_file_T2(raw_dat_file: str) -> Tuple: 
     """
     Load T2 fastmri file.
@@ -41,8 +57,8 @@ def load_dat_file_T2(raw_dat_file: str) -> Tuple:
     Returns:
 
     """
-    import twixtools
-    twix = twixtools.read_twix(str(raw_dat_file))
+    twixtools = _require_twixtools()
+    twix = _read_twix_with_pmu_fallback(raw_dat_file)
     mapped = twixtools.map_twix(twix)
 
     im_data = mapped[-1]['image']
@@ -112,7 +128,7 @@ def load_dat_file_dwi(
     returned as the final tuple element.
     """
 
-    import twixtools
+    twixtools = _require_twixtools()
     twix = twixtools.read_twix(str(raw_dat_file))
     mapped = twixtools.map_twix(twix)
 

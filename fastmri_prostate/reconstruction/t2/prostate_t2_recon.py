@@ -1,33 +1,91 @@
-import os
 import numpy as np
-from typing import Dict
+from typing import Dict, Iterable, Sequence, Tuple
 
 from fastmri_prostate.data.mri_data import zero_pad_kspace_hdr
 from fastmri_prostate.reconstruction.utils import center_crop_im, ifftnd
 from fastmri_prostate.reconstruction.grappa import Grappa
 
 
-def image_recon(kspace_post_grappa_all: np.ndarray, calib_data: np.ndarray, hdr) -> Dict:
+DEFAULT_T2_AVERAGING_SCHEMES: Tuple[Tuple[str, Tuple[int, ...]], ...] = (
+    ("axt2_1", (1,)),
+    ("axt2_2", (2,)),
+    ("axt2_1_2", (1, 2)),
+    ("axt2_2_3", (2, 3)),
+    ("axt2_1_3", (1, 3)),
+    ("axt2_1_2_3", (1, 2, 3)),
+)
+
+
+def _canonicalize_averages(averages: Iterable[int]) -> Tuple[int, ...]:
+    ordered = sorted({int(avg) for avg in averages})
+    if not ordered:
+        raise ValueError("Average scheme cannot be empty.")
+    return tuple(ordered)
+
+
+def _normalize_averaging_schemes(
+    num_avg: int,
+    averaging_schemes: Sequence[Tuple[str, Sequence[int]]] | None,
+) -> list[Tuple[str, Tuple[int, ...]]]:
+    if averaging_schemes is None:
+        default = tuple(range(1, num_avg + 1))
+        return [(f"axt2_{'_'.join(str(idx) for idx in default)}", default)]
+
+    normalized: list[Tuple[str, Tuple[int, ...]]] = []
+    for raw_tag, raw_indices in averaging_schemes:
+        scheme = _canonicalize_averages(raw_indices)
+        tag = raw_tag.strip() if raw_tag else f"axt2_{'_'.join(str(idx) for idx in scheme)}"
+        normalized.append((tag, scheme))
+
+    return normalized
+
+
+def image_recon(
+    kspace_post_grappa_all: np.ndarray,
+    calib_data: np.ndarray,
+    hdr,
+    averaging_schemes: Sequence[Tuple[str, Sequence[int]]] | None = None,
+    store_kspace: bool = True,
+) -> Dict:
     num_avg, num_slices, num_coils, num_ro, num_pe = kspace_post_grappa_all.shape
     im_list = []
-    for average in range(num_avg): 
+    for average in range(num_avg):
         kspace_grappa = kspace_post_grappa_all[average, ...]
         kspace_grappa_padded = zero_pad_kspace_hdr(kspace_grappa, hdr)
         coil_combined_image = create_coil_combined_im(kspace_grappa_padded)
         im_list.append(coil_combined_image)
-    
-    im = np.array(im_list)
-    im_3d = np.mean(im, axis = 0) 
-    # center crop image to 320 x 320
+
+    im = np.asarray(im_list)
+    averaging_schemes = _normalize_averaging_schemes(num_avg, averaging_schemes)
+
+    per_average = np.asarray([center_crop_im(im[avg], [320, 320]) for avg in range(num_avg)], dtype=np.float32)
+    reconstruction_rss = center_crop_im(np.mean(im, axis=0), [320, 320]).astype(np.float32)
+
     img_dict = {}
-    img_dict['reconstruction_rss'] = center_crop_im(im_3d, [320, 320]) 
-    img_dict['kspace_post_grappa'] = kspace_post_grappa_all
-    img_dict['calibration_data'] = calib_data
+    img_dict["reconstruction_rss"] = reconstruction_rss
+    img_dict["images/per_average"] = per_average
+    img_dict["metadata/averaging_schemes"] = np.asarray([tag for tag, _ in averaging_schemes], dtype="S24")
+
+    for tag, one_based_indices in averaging_schemes:
+        zero_based_indices = np.asarray(one_based_indices, dtype=int) - 1
+        averaged = np.mean(im[zero_based_indices, ...], axis=0)
+        img_dict[f"images/averaged/{tag}"] = center_crop_im(averaged, [320, 320]).astype(np.float32)
+        img_dict[f"metadata/average_indices/{tag}"] = np.asarray(one_based_indices, dtype=np.int16)
+
+    if store_kspace:
+        img_dict["kspace_post_grappa"] = kspace_post_grappa_all
+        img_dict["kspace/post_grappa_full"] = kspace_post_grappa_all
 
     return img_dict
 
 
-def t2_reconstruction(kspace_data: np.ndarray, calib_data: np.ndarray, hdr: Dict) -> None:
+def t2_reconstruction(
+    kspace_data: np.ndarray,
+    calib_data: np.ndarray,
+    hdr: Dict,
+    averaging_schemes: Sequence[Tuple[str, Sequence[int]]] | None = None,
+    store_kspace: bool = True,
+) -> Dict:
     """
     Perform T2-weighted image reconstruction using GRAPPA technique.
 
@@ -46,7 +104,9 @@ def t2_reconstruction(kspace_data: np.ndarray, calib_data: np.ndarray, hdr: Dict
         Reconstructed image with shape (num_slices, 320, 320)
     """
     num_avg, num_slices, num_coils, num_ro, num_pe = kspace_data.shape
-    
+    if num_avg < 2:
+        raise ValueError(f"T2 reconstruction requires at least 2 averages, found {num_avg}.")
+
     # Calib_data shape: num_slices, num_coils, num_pe_cal
     grappa_weight_dict = {}
     grappa_weight_dict_2 = {}
@@ -70,20 +130,28 @@ def t2_reconstruction(kspace_data: np.ndarray, calib_data: np.ndarray, hdr: Dict
     # apply GRAPPA weights
     kspace_post_grappa_all = np.zeros(shape=kspace_data.shape, dtype=complex)
 
-    for average, grappa_obj, grappa_weight_dict in zip(
-        [0, 1, 2],
-        [grappa_obj, grappa_obj_2, grappa_obj],
-        [grappa_weight_dict, grappa_weight_dict_2, grappa_weight_dict]
-    ):
+    for average in range(num_avg):
+        if average % 2 == 0:
+            grappa_obj_cur = grappa_obj
+            grappa_weights_cur = grappa_weight_dict
+        else:
+            grappa_obj_cur = grappa_obj_2
+            grappa_weights_cur = grappa_weight_dict_2
         for slice_num in range(num_slices):
             kspace_slice_regridded = kspace_data[average, slice_num, ...]
-            kspace_post_grappa = grappa_obj.apply_weights(
+            kspace_post_grappa = grappa_obj_cur.apply_weights(
                 np.transpose(kspace_slice_regridded, (2, 0, 1)),
-                grappa_weight_dict[slice_num]
+                grappa_weights_cur[slice_num]
             )
             kspace_post_grappa_all[average, slice_num, ...] = np.moveaxis(np.moveaxis(kspace_post_grappa, 0, 1), 1, 2)
 
-    return image_recon(kspace_post_grappa_all, calib_data, hdr)
+    return image_recon(
+        kspace_post_grappa_all,
+        calib_data,
+        hdr,
+        averaging_schemes=averaging_schemes,
+        store_kspace=store_kspace,
+    )
 
 
 def create_coil_combined_im(multicoil_multislice_kspace: np.ndarray) -> np.ndarray:

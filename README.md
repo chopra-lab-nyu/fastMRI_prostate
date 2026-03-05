@@ -161,11 +161,11 @@ For processing large volumes of `.dat` files on HPC clusters with SLURM, use the
 │  (source_root)  │     │  (.dat + .ready) │     │  (.h5 files)    │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
         │                        │
-   transfer.py              worker.py (×N)
+ transfer.py / transfer_t2.py   worker.py / worker_t2.py (×N)
    (data_mover)             (CPU nodes)
 ```
 
-### Configuration (`config/streaming.yaml`)
+### Configuration: DWI (`config/streaming.yaml`)
 
 ```yaml
 transfer:
@@ -188,16 +188,71 @@ process:
   delete_dat: true                        # Delete .dat after successful recon
 ```
 
-### Running the Pipeline
+### Configuration: T2 (`config/streaming_t2.yaml`)
 
-**Step 1: Start workers first** (they'll wait for files)
-```bash
-sbatch sbatch/stream_workers.sh
+```yaml
+transfer:
+  manifest_csv: /path/to/t2_manifest.csv  # CSV with 'path' and optional 'size'
+  source_root: /mnt/research_drive
+  staging_dir: /scratch/t2_staging
+  max_staging_gb: 500
+  min_bytes: 500000000
+  poll_seconds: 30
+
+process:
+  output_dir: /scratch/t2_output
+  averages: "all"                         # Or list like [[1], [2], [1,2], [2,3], [1,3], [1,2,3]]
+  skip_kspace: true
+  poll_seconds: 10
+  delete_dat: true
 ```
 
-**Step 2: Start transfer**
+### Build Manifest CSV (Examples)
+
+Commands below assume you start in:
+
 ```bash
+cd /mnt/td2105/MRIScan/Archive/yarra_rds
+```
+
+**DWI manifest example**
+
+```bash
+OUT="/gpfs/data/prostatelab/processed_data/csv/kspace_prostate_dwi_file_metadata.csv"
+
+{
+  echo "size,path"
+  find . -type f -path "*/Hersh_VidaProstateDiffusion/*" -iname "*AX*" -name "*.dat" \
+    -exec du -h {} + \
+  | sed $'s/\t/,/1'
+} > "$OUT"
+```
+
+**T2 manifest example**
+
+```bash
+OUT="/gpfs/data/prostatelab/processed_data/csv/kspace_prostate_axt2_file_metadata.csv"
+
+{
+  echo "size,path"
+  find . -type f -path "*/Hersh_VidaProstate/*" -iname "*AXT2*" -name "*.dat" \
+    -exec du -h {} + \
+  | sed $'s/\t/,/1'
+} > "$OUT"
+```
+
+### Running the Pipeline
+
+**DWI**
+```bash
+sbatch sbatch/stream_workers.sh
 sbatch sbatch/stream_transfer.sh
+```
+
+**T2**
+```bash
+sbatch sbatch/stream_workers_t2.sh
+sbatch sbatch/stream_transfer_t2.sh
 ```
 
 ### How It Works
@@ -216,6 +271,8 @@ sbatch sbatch/stream_transfer.sh
 3. Claims files via atomic `mkdir()` lock (prevents duplicate processing)
 4. Processes file → writes `.h5` → deletes `.dat` and markers
 5. Exits when transfer inactive and no files remain
+
+T2 uses the same protocol via `scripts/transfer_t2.py` and `scripts/worker_t2.py`.
 
 ### Worker Coordination
 
@@ -237,13 +294,13 @@ Workers use a work-stealing pattern for optimal load balancing:
 
 ```bash
 # Check worker status
-squeue -u $USER | grep dwi
+squeue -u $USER | egrep 'dwi|t2'
 
 # Watch staging directory
 watch -n 5 'ls /scratch/staging/*.ready 2>/dev/null | wc -l'
 
 # Tail worker logs
-tail -f logs_streaming/dwi_stream_*.err
+tail -f logs_streaming/*stream*.err
 
 # Count completed reconstructions
 ls /scratch/output/*.h5 | wc -l
