@@ -136,3 +136,4 @@ varnet/
 sbatch/logs*/
 *logs*/
 fastmri_prostate_debug.ipynb
+.codex

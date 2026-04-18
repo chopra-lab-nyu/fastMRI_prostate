@@ -3,7 +3,7 @@
 #SBATCH --time=6-00:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --array=0-40
+#SBATCH --array=0-50
 #SBATCH --job-name=t2_stream
 #SBATCH --output=logs_streaming/%x_%A_%a.out
 #SBATCH --error=logs_streaming/%x_%A_%a.err
@@ -19,8 +19,8 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 
 cd /gpfs/data/chopralab/td2105/fastmri_prostate_internal/fastMRI_prostate/
 export PYTHONPATH="$(pwd):${PYTHONPATH}"
-STREAM_CONFIG="${STREAM_CONFIG:-config/streaming_t2.yaml}"
+STREAM_CONFIG="${STREAM_CONFIG:-config/streaming/t2.yaml}"
 
-python scripts/worker_t2.py \
+python -m scripts.streaming.t2.worker \
     --config "${STREAM_CONFIG}" \
     --worker-id "${SLURM_ARRAY_TASK_ID}"

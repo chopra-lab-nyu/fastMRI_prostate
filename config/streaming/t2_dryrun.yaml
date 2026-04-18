@@ -1,13 +1,15 @@
 transfer:
   manifest_csv: /gpfs/data/prostatelab/processed_data/csv/kspace_prostate_axt2_file_metadata.csv
   source_root: /mnt/td2105/MRIScan/Archive/yarra_rds
-  staging_dir: /gpfs/scratch/td2105/t2_stream/staging
-  max_staging_gb: 7000
+  staging_dir: /gpfs/scratch/td2105/t2_stream_dryrun/staging
+  max_staging_gb: 500
   min_bytes: 500000000
+  max_files: 20
   poll_seconds: 30
 
 process:
-  output_dir: /gpfs/scratch/td2105/t2_stream/recons_rss
+  output_dir: /gpfs/scratch/td2105/t2_stream_dryrun/recons_rss_grappa
+  output_dir_single_average: /gpfs/scratch/td2105/t2_stream_dryrun/recons_rss_grappa_single_average
   averages: "all"
   skip_kspace: true
   poll_seconds: 10

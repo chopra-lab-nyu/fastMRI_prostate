@@ -46,7 +46,7 @@ def adc(raw_images: np.ndarray, adc_scale: float, b_values: list) -> Tuple[np.nd
     if np.mean(raw_images) < 1e-3:
         raw_images = 1e5 * raw_images
 
-    log_image = np.log(raw_images)
+    log_image = np.log(raw_images + 1.0)
     sum_log_image = np.mean(log_image, axis=2)
 
     X = np.column_stack((b_values, np.ones(2)))

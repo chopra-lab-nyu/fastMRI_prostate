@@ -1,0 +1,12 @@
+transfer:
+  source_root: /mnt/td2105/MRIScan/Archive/yarra_rds
+  recon_only_manifest_csv: /gpfs/scratch/td2105/dwi_stream/accession_cohort_manifests/prostate_mri_accession_cohorts_recon_only_manifest.csv
+  aligned_manifest_csv: /gpfs/scratch/td2105/dwi_stream/accession_cohort_manifests/prostate_mri_accession_cohorts_aligned_manifest.csv
+  staging_dir: /gpfs/scratch/td2105/dwi_stream/staging_refresh_espirit
+  max_staging_gb: 7000
+  poll_seconds: 30
+
+process:
+  enable_phasecorr: false
+  poll_seconds: 10
+  delete_dat: true

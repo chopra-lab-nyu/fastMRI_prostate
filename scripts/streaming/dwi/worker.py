@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from fastmri_prostate_recon_from_dat import (
+from scripts.streaming.dwi.recon_from_dat import (
     DEFAULT_AVERAGING_SCHEMES,
     DEFAULT_DIRECTIONS,
     DEFAULT_COMBINES,
@@ -40,7 +40,7 @@ def acquire_lock(dat_file: Path) -> Path | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Watch staging directory and run ESC reconstruction")
-    parser.add_argument("--config", default="config/streaming.yaml")
+    parser.add_argument("--config", default="config/streaming/dwi.yaml")
     parser.add_argument("--worker-id", type=int, required=True, help="Unique ID for this worker (for logging)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()

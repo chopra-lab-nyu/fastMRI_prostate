@@ -1,6 +1,9 @@
 import json
+import importlib
 import logging
 import struct
+import sys
+import types
 from pathlib import Path
 import h5py
 import numpy as np
@@ -19,23 +22,29 @@ def get_slice_order(hdr):
     return slice_order
 
 
-def _require_twixtools():
-    try:
-        import twixtools  # type: ignore
-    except ImportError as exc:  # pragma: no cover - dependency hint
-        raise ImportError(
-            "twixtools is required to load Siemens .dat files. Install via `pip install twixtools`."
-        ) from exc
-    return twixtools
+def _import_twixtools():
+    """Import twixtools without requiring its optional PMU plotting dependency."""
+
+    if "twixtools.pmu" not in sys.modules:
+        pmu_stub = types.ModuleType("twixtools.pmu")
+
+        class PMU:  # pragma: no cover - simple compatibility shim
+            def __init__(self, *args, **kwargs):
+                self.signal = {}
+
+        pmu_stub.PMU = PMU
+        sys.modules["twixtools.pmu"] = pmu_stub
+
+    return importlib.import_module("twixtools")
 
 
 def _read_twix_with_pmu_fallback(raw_dat_file: Union[str, Path]):
     """Read TWIX data and retry without PMU parsing on known PMU decode errors."""
 
-    twixtools = _require_twixtools()
+    twixtools = _import_twixtools()
     path = str(raw_dat_file)
     try:
-        return twixtools.read_twix(path, verbose=False)
+        return twixtools.read_twix(path, parse_pmu=False, verbose=False)
     except struct.error as exc:
         logging.warning(
             "PMU parsing failed for %s (%s); retrying with parse_pmu=False.",
@@ -43,6 +52,21 @@ def _read_twix_with_pmu_fallback(raw_dat_file: Union[str, Path]):
             exc,
         )
         return twixtools.read_twix(path, parse_pmu=False, verbose=False)
+
+
+def _select_twix_axes(arr: np.ndarray, dims: Sequence[str], names: Sequence[str]) -> np.ndarray:
+    axes = [dims.index(name) for name in names]
+    out = np.moveaxis(arr, axes, range(len(names)))
+
+    if out.ndim > len(names):
+        squeeze_axes = tuple(i for i in range(len(names), out.ndim) if out.shape[i] == 1)
+        if squeeze_axes:
+            out = np.squeeze(out, axis=squeeze_axes)
+
+    if out.ndim != len(names):
+        raise ValueError(f"Unexpected TWIX shape after selecting axes {names}: {out.shape}")
+
+    return out
 
 
 def load_dat_file_T2(raw_dat_file: str) -> Tuple: 
@@ -57,18 +81,19 @@ def load_dat_file_T2(raw_dat_file: str) -> Tuple:
     Returns:
 
     """
-    twixtools = _require_twixtools()
+    twixtools = _import_twixtools()
     twix = _read_twix_with_pmu_fallback(raw_dat_file)
     mapped = twixtools.map_twix(twix)
 
     im_data = mapped[-1]['image']
-    refscan_data = np.squeeze(mapped[-1]['refscan'][:])
+    refscan = mapped[-1]['refscan']
     hdr = mapped[-1]['hdr']
 
     im_data.flags['remove_os'] = False
     im_data.flags['average']['Ave'] = False
 
-    data = im_data[:].squeeze()
+    data = _select_twix_axes(im_data[:], list(im_data.dims), ["Sli", "Ave", "Lin", "Cha", "Col"])
+    refscan_data = _select_twix_axes(refscan[:], list(refscan.dims), ["Sli", "Lin", "Cha", "Col"])
 
     slice_order = get_slice_order(hdr)
     data = data[slice_order, ...]
@@ -128,8 +153,8 @@ def load_dat_file_dwi(
     returned as the final tuple element.
     """
 
-    twixtools = _require_twixtools()
-    twix = twixtools.read_twix(str(raw_dat_file))
+    twixtools = _import_twixtools()
+    twix = _read_twix_with_pmu_fallback(raw_dat_file)
     mapped = twixtools.map_twix(twix)
 
     im_data = mapped[-1]['image']
@@ -167,12 +192,12 @@ def load_dat_file_dwi(
     if include_phasecorr:
         phasecorr = phasecorr[:, slice_order, ...]
     
-    if kspace.shape[2] > calibration.shape[1]:
-        calibration = _zero_pad_along_axis(calibration, axis=1, target_size=kspace.shape[2])
-
-    # Reorder to match reconstruction expectations
+    # Preserve the original refscan width for GRAPPA / ESPIRiT.
     kspace = np.transpose(kspace, (0, 1, 3, 4, 2)).copy()
     calibration = np.transpose(calibration, (0, 2, 3, 1)).copy()
+    # Keep the trailing 32 calibration lines.
+    if calibration.shape[-1] > 32:
+        calibration = calibration[..., -32:].copy()
     if include_phasecorr:
         phasecorr = phasecorr.copy()
 
@@ -445,7 +470,7 @@ def load_dwi_esc_h5(h5_path: Union[str, Path]) -> Dict[str, Any]:
     Parameters
     ----------
     h5_path : str or Path
-        Path to the .h5 file produced by `fastmri_prostate_recon_from_dat`.
+        Path to the .h5 file produced by `scripts.streaming.dwi.recon_from_dat`.
 
     Returns
     -------

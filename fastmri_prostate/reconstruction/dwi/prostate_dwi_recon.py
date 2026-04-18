@@ -24,9 +24,9 @@ def _resize_maps(maps: np.ndarray, target_x: int, target_y: int) -> np.ndarray:
     if (cx, cy) == (target_x, target_y):
         return maps
     zoom_factors = (1.0, target_x / cx, target_y / cy)
-    real = zoom(maps.real, zoom_factors, order=1, mode="nearest")
-    imag = zoom(maps.imag, zoom_factors, order=1, mode="nearest")
-    return real + 1j * imag
+    mag = zoom(np.abs(maps), zoom_factors, order=1, mode="nearest")
+    phase = zoom(np.angle(maps), zoom_factors, order=0, mode="nearest")
+    return mag * np.exp(1j * phase)
 
 
 def _estimate_phasecorr_correction(
@@ -336,20 +336,21 @@ def dwi_reconstruction_diffusion(
     if enable_espirit:
         logging.info("Precomputing ESPIRiT maps for %d slices", kspace.shape[1])
         for slice_num in range(kspace.shape[1]):
-            calibration_regridded = trapezoidal_regridding(calibration[slice_num, ...], hdr)
+            calibration_for_espirit = calibration[slice_num, ...].copy()
             if enable_phasecorr:
                 correction = phasecorr_corrections.get(slice_num)
                 if correction is not None:
-                    calib_for_phase = np.transpose(calibration_regridded, (2, 0, 1))
+                    calib_for_phase = np.transpose(calibration_for_espirit, (2, 0, 1))
                     _apply_phasecorr(calib_for_phase, correction)
-                    calibration_regridded = np.transpose(calib_for_phase, (1, 2, 0))
-            calib_coil_first = calibration_regridded  # already (coils, x, y)
+                    calibration_for_espirit = np.transpose(calib_for_phase, (1, 2, 0))
+            calib_coil_first = calibration_for_espirit  # direct calibration k-space (coils, x, y)
             raw_maps = espirit_maps_from_calib(calib_coil_first)
             espirit_maps[slice_num] = _resize_maps(raw_maps, kspace.shape[3], kspace.shape[4])
             if slice_num % 5 == 0 or slice_num == kspace.shape[1] - 1:
                 logging.info(
-                    "  Slice %d: ESPIRiT map shape %s -> resized to (%d, %d, %d)",
+                    "  Slice %d: ESPIRiT calib shape %s -> maps %s -> resized to (%d, %d, %d)",
                     slice_num,
+                    calib_coil_first.shape,
                     raw_maps.shape,
                     espirit_maps[slice_num].shape[0],
                     espirit_maps[slice_num].shape[1],

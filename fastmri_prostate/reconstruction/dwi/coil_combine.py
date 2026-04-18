@@ -98,15 +98,9 @@ def espirit(X: np.ndarray, k: int, r: int, t: float, c: float) -> np.ndarray:
             for kdx in range(0, sz):
                 Gq = kerimgs[idx, jdx, kdx, :, :]
                 u, s, vh = np.linalg.svd(Gq, full_matrices=True)
-                selected = False
                 for ldx in range(0, nc):
-                    # Use a lenient threshold on the singular values; fall back to the dominant
-                    # vector to avoid all-zero maps (which would produce black ESPIRiT images).
-                    if s[ldx] > c:
+                    if s[ldx] ** 2 > c:
                         maps[idx, jdx, kdx, :, ldx] = u[:, ldx]
-                        selected = True
-                if not selected:
-                    maps[idx, jdx, kdx, :, 0] = u[:, 0]
                 
                 pixel_count += 1
                 if pixel_count % log_interval == 0:
@@ -164,7 +158,7 @@ def espirit_maps_from_calib(
 
 def combine_with_maps(coil_images: np.ndarray, sens_maps: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     """
-    SENSE-style combination given coil images and sensitivity maps.
+    Combination given coil images and sensitivity maps.
 
     Parameters
     ----------
@@ -173,7 +167,7 @@ def combine_with_maps(coil_images: np.ndarray, sens_maps: np.ndarray, eps: float
     sens_maps : np.ndarray
         Complex sensitivity maps with shape (coils, x, y).
     eps : float
-        Small constant to avoid division by zero.
+        Unused; retained for signature compatibility.
 
     Returns
     -------
@@ -181,6 +175,5 @@ def combine_with_maps(coil_images: np.ndarray, sens_maps: np.ndarray, eps: float
         Combined magnitude image with shape (x, y).
     """
 
-    num = np.sum(np.conj(sens_maps) * coil_images, axis=0)
-    denom = np.sum(np.abs(sens_maps) ** 2, axis=0) + eps
-    return np.abs(num / denom)
+    del eps
+    return np.abs(np.sum(np.conj(sens_maps) * coil_images, axis=0))

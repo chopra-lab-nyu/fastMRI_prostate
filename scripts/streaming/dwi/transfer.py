@@ -203,7 +203,7 @@ def throttle(staging: Path, max_bytes: float, sleep_seconds: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Copy .dat files into staging for streaming recon")
-    parser.add_argument("--config", default="config/streaming.yaml")
+    parser.add_argument("--config", default="config/streaming/dwi.yaml")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 

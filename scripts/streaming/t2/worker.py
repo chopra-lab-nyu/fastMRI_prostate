@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from fastmri_prostate_t2_recon_from_dat import (
+from scripts.streaming.t2.recon_from_dat import (
     DEFAULT_AVERAGING_SCHEMES,
     UnsupportedAverageCountError,
     parse_average_schemes,
@@ -37,7 +37,7 @@ def acquire_lock(dat_file: Path) -> Path | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Watch T2 staging directory and run reconstruction")
-    parser.add_argument("--config", default="config/streaming_t2.yaml")
+    parser.add_argument("--config", default="config/streaming/t2.yaml")
     parser.add_argument("--worker-id", type=int, required=True, help="Unique ID for this worker (for logging)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
@@ -49,6 +49,10 @@ def main() -> None:
     process_cfg = cfg["process"]
     output_dir = Path(process_cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir_single_average_raw = process_cfg.get("output_dir_single_average")
+    output_dir_single_average = Path(output_dir_single_average_raw) if output_dir_single_average_raw else None
+    if output_dir_single_average is not None:
+        output_dir_single_average.mkdir(parents=True, exist_ok=True)
 
     raw_avg = process_cfg.get("averages")
     averaging_schemes = list(DEFAULT_AVERAGING_SCHEMES) if raw_avg in (None, [], "all", "ALL") else parse_average_schemes(raw_avg)
@@ -82,6 +86,7 @@ def main() -> None:
                     dat_file=dat_file,
                     averaging_schemes=averaging_schemes,
                     output_dir=output_dir,
+                    single_average_output_dir=output_dir_single_average,
                     store_kspace=not skip_kspace,
                 )
             except UnsupportedAverageCountError as exc:

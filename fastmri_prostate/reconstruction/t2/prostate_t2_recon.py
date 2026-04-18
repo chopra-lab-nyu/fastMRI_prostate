@@ -104,18 +104,21 @@ def t2_reconstruction(
         Reconstructed image with shape (num_slices, 320, 320)
     """
     num_avg, num_slices, num_coils, num_ro, num_pe = kspace_data.shape
-    if num_avg < 2:
-        raise ValueError(f"T2 reconstruction requires at least 2 averages, found {num_avg}.")
+    if num_avg < 1:
+        raise ValueError(f"T2 reconstruction requires at least 1 average, found {num_avg}.")
 
     # Calib_data shape: num_slices, num_coils, num_pe_cal
     grappa_weight_dict = {}
-    grappa_weight_dict_2 = {}
 
     kspace_slice_regridded = kspace_data[0, 0, ...]
     grappa_obj = Grappa(np.transpose(kspace_slice_regridded, (2, 0, 1)), kernel_size=(5, 5), coil_axis=1)
-
-    kspace_slice_regridded_2 = kspace_data[1, 0, ...]
-    grappa_obj_2 = Grappa(np.transpose(kspace_slice_regridded_2, (2, 0, 1)), kernel_size=(5, 5), coil_axis=1)
+    if num_avg > 1:
+        grappa_weight_dict_2 = {}
+        kspace_slice_regridded_2 = kspace_data[1, 0, ...]
+        grappa_obj_2 = Grappa(np.transpose(kspace_slice_regridded_2, (2, 0, 1)), kernel_size=(5, 5), coil_axis=1)
+    else:
+        grappa_weight_dict_2 = grappa_weight_dict
+        grappa_obj_2 = grappa_obj
     
     # calculate GRAPPA weights
     for slice_num in range(num_slices):
@@ -123,9 +126,10 @@ def t2_reconstruction(
         grappa_weight_dict[slice_num] = grappa_obj.compute_weights(
             np.transpose(calibration_regridded, (2, 0 ,1))
         )
-        grappa_weight_dict_2[slice_num] = grappa_obj_2.compute_weights(
-            np.transpose(calibration_regridded, (2, 0 ,1))
-        )
+        if num_avg > 1:
+            grappa_weight_dict_2[slice_num] = grappa_obj_2.compute_weights(
+                np.transpose(calibration_regridded, (2, 0 ,1))
+            )
 
     # apply GRAPPA weights
     kspace_post_grappa_all = np.zeros(shape=kspace_data.shape, dtype=complex)

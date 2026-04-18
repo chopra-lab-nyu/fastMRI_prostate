@@ -54,7 +54,7 @@ python fastmri_prostate_recon.py \
 ### From Siemens .dat Files
 
 ```bash
-python fastmri_prostate_recon_from_dat.py \
+python -m scripts.streaming.dwi.recon_from_dat \
     --data-dir <directory with .dat files> \
     --output-dir <path to store recons> \
     --combines rss,espirit \
@@ -76,12 +76,24 @@ fastmri_prostate/
 │       ├── coil_combine.py          # ESPIRiT and coil combination
 │       ├── diffusion_metrics.py     # ADC, trace, b1500 computation
 │       └── regridding.py            # EPI trajectory correction
+├── scripts/
+│   ├── streaming/
+│   │   ├── dwi/                 # DWI transfer, worker, recon, and refresh entrypoints
+│   │   └── t2/                  # T2 transfer, worker, and recon entrypoints
+│   ├── debug/
+│   │   └── dwi/                 # DWI comparison and plotting utilities
+│   └── shared/                  # Shared script helpers
+├── sbatch/
+│   ├── streaming/               # SLURM launchers for active pipelines
+│   └── debug/                   # SLURM launchers for debug utilities
+├── config/
+│   └── streaming/               # Streaming pipeline configs
 └── visualization/               # Plotting utilities
 ```
 
 ## DWI Reconstruction Pipeline
 
-The DWI reconstruction pipeline (`fastmri_prostate_recon_from_dat.py`) performs:
+The DWI reconstruction pipeline (`scripts.streaming.dwi.recon_from_dat`) performs:
 
 1. **Trapezoidal regridding** - Corrects for EPI readout trajectory
 2. **GRAPPA reconstruction** - Fills missing k-space lines using calibration data
@@ -95,7 +107,7 @@ The DWI reconstruction pipeline (`fastmri_prostate_recon_from_dat.py`) performs:
 ### Command Line Options
 
 ```bash
-python fastmri_prostate_recon_from_dat.py \
+python -m scripts.streaming.dwi.recon_from_dat \
     --data-dir <input directory> \
     --output-dir <output directory> \
     --directions b50x,b50y,b50z,b1000x,b1000y,b1000z \
@@ -161,11 +173,11 @@ For processing large volumes of `.dat` files on HPC clusters with SLURM, use the
 │  (source_root)  │     │  (.dat + .ready) │     │  (.h5 files)    │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
         │                        │
- transfer.py / transfer_t2.py   worker.py / worker_t2.py (×N)
-   (data_mover)             (CPU nodes)
+ scripts.streaming.*.transfer   scripts.streaming.*.worker (×N)
+   (data_mover)                     (CPU nodes)
 ```
 
-### Configuration: DWI (`config/streaming.yaml`)
+### Configuration: DWI (`config/streaming/dwi.yaml`)
 
 ```yaml
 transfer:
@@ -188,7 +200,7 @@ process:
   delete_dat: true                        # Delete .dat after successful recon
 ```
 
-### Configuration: T2 (`config/streaming_t2.yaml`)
+### Configuration: T2 (`config/streaming/t2.yaml`)
 
 ```yaml
 transfer:
@@ -203,6 +215,23 @@ process:
   output_dir: /scratch/t2_output
   averages: "all"                         # Or list like [[1], [2], [1,2], [2,3], [1,3], [1,2,3]]
   skip_kspace: true
+  poll_seconds: 10
+  delete_dat: true
+```
+
+### Configuration: DWI ESPIRiT Refresh (`config/streaming/refresh_espirit.yaml`)
+
+```yaml
+transfer:
+  source_root: /mnt/td2105/MRIScan/Archive/yarra_rds
+  recon_only_manifest_csv: /path/to/prostate_mri_accession_cohorts_recon_only_manifest.csv
+  aligned_manifest_csv: /path/to/prostate_mri_accession_cohorts_aligned_manifest.csv
+  staging_dir: /scratch/dwi_refresh_staging
+  max_staging_gb: 7000
+  poll_seconds: 30
+
+process:
+  enable_phasecorr: false
   poll_seconds: 10
   delete_dat: true
 ```
@@ -245,19 +274,27 @@ OUT="/gpfs/data/prostatelab/processed_data/csv/kspace_prostate_axt2_file_metadat
 
 **DWI**
 ```bash
-sbatch sbatch/stream_workers.sh
-sbatch sbatch/stream_transfer.sh
+sbatch sbatch/streaming/dwi/workers.sh
+sbatch sbatch/streaming/dwi/transfer.sh
 ```
 
 **T2**
 ```bash
-sbatch sbatch/stream_workers_t2.sh
-sbatch sbatch/stream_transfer_t2.sh
+sbatch sbatch/streaming/t2/workers.sh
+sbatch sbatch/streaming/t2/transfer.sh
 ```
+
+**DWI ESPIRiT refresh**
+```bash
+sbatch sbatch/streaming/dwi/refresh_espirit_workers.sh
+sbatch sbatch/streaming/dwi/refresh_espirit_transfer.sh
+```
+
+The refresh pipeline stages DATs for the `recon_only` cohort, refreshes the `aligned` subset first, writes `aligned_complete.marker` in the refresh staging directory when that subset finishes, and then continues the remaining `recon_only` cases.
 
 ### How It Works
 
-**Transfer Script (`scripts/transfer.py`):**
+**Transfer Script (`scripts.streaming.dwi.transfer`):**
 1. Reads manifest CSV and filters by size
 2. Parses Siemens filename metadata to pair main scans with prescans
 3. Copies files to staging, creates `.ready` marker after each copy
@@ -265,14 +302,26 @@ sbatch sbatch/stream_transfer_t2.sh
 5. Throttles when staging exceeds `max_staging_gb`
 6. Sets `.transfer_active` flag while running
 
-**Worker Script (`scripts/worker.py`):**
+**Worker Script (`scripts.streaming.dwi.worker`):**
 1. Watches for `*.dat.ready` markers in staging
 2. Uses **work-stealing**: any worker can grab any unlocked file
 3. Claims files via atomic `mkdir()` lock (prevents duplicate processing)
 4. Processes file → writes `.h5` → deletes `.dat` and markers
 5. Exits when transfer inactive and no files remain
 
-T2 uses the same protocol via `scripts/transfer_t2.py` and `scripts/worker_t2.py`.
+T2 uses the same protocol via `scripts.streaming.t2.transfer` and `scripts.streaming.t2.worker`.
+
+### Debug Tools
+
+Debug and comparison utilities live under `scripts/debug/dwi/` and `sbatch/debug/dwi/`.
+
+Examples:
+
+```bash
+python -m scripts.debug.dwi.compare_espirit_patch --help
+python -m scripts.debug.dwi.compare_public_h5_dwi_recon --help
+python -m scripts.debug.dwi.plot_metrics_slice <recon.h5>
+```
 
 ### Worker Coordination
 
