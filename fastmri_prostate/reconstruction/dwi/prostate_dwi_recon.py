@@ -93,10 +93,10 @@ class DWIReconstructionResult:
 
     images: Dict[str, np.ndarray]
     esc_images_per_average: Optional[np.ndarray]
-    rss_images_per_average: np.ndarray
+    rss_images_per_average: Optional[np.ndarray]
     espirit_images_per_average: Optional[np.ndarray]
-    post_grappa_coil_images: np.ndarray
-    post_grappa_kspace: np.ndarray
+    post_grappa_coil_images: Optional[np.ndarray]
+    post_grappa_kspace: Optional[np.ndarray]
     kspace_esc: Optional[np.ndarray]
     kspace_by_direction: Dict[str, np.ndarray]
     direction_indices: Dict[str, np.ndarray]
@@ -111,6 +111,8 @@ class DWIReconstructionResult:
         if max_averages is not None:
             indices = indices[:max(1, max_averages)]
 
+        if self.kspace_esc is None:
+            raise RuntimeError("ESC k-space was not stored for this reconstruction.")
         return self.kspace_esc[np.asarray(indices, dtype=int), ...]
 
 def get_direction_indices(num_averages: int) -> Dict[str, np.ndarray]:
@@ -262,6 +264,8 @@ def dwi_reconstruction_diffusion(
     enable_espirit: bool = True,
     enable_phasecorr: bool = False,
     phasecorr_center_width: int = 24,
+    enable_rss: bool = True,
+    store_post_grappa: bool = True,
 ) -> DWIReconstructionResult:
     """Run GRAPPA + emulated single-coil (ESC) reconstruction.
 
@@ -287,6 +291,10 @@ def dwi_reconstruction_diffusion(
         Whether to apply odd/even EPI phase correction using phasecorr data.
     phasecorr_center_width : int, optional
         Number of central phase-encode lines used to estimate the correction.
+    enable_rss : bool, optional
+        Whether to store RSS per-average images.
+    store_post_grappa : bool, optional
+        Whether to store post-GRAPPA coil-domain images and k-space.
 
     Returns
     -------
@@ -323,13 +331,12 @@ def dwi_reconstruction_diffusion(
 
     img_vol = np.zeros((kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4]), dtype=float) if enable_esc else None
     kspace_esc_vol = np.zeros((kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4]), dtype=np.complex64) if enable_esc else None
-    post_grappa_img_vol = np.zeros(
-        (kspace.shape[0], kspace.shape[1], kspace.shape[2], kspace.shape[3], kspace.shape[4]),
-        dtype=np.complex64,
-    )
-    post_grappa_kspace_vol = np.zeros_like(post_grappa_img_vol, dtype=kspace.dtype)
-    rss_img_vol = np.zeros((kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4]), dtype=float)
-    espirit_img_vol = np.zeros_like(rss_img_vol) if enable_espirit else None
+    post_grappa_shape = (kspace.shape[0], kspace.shape[1], kspace.shape[2], kspace.shape[3], kspace.shape[4])
+    post_grappa_img_vol = np.zeros(post_grappa_shape, dtype=np.complex64) if store_post_grappa else None
+    post_grappa_kspace_vol = np.zeros(post_grappa_shape, dtype=kspace.dtype) if store_post_grappa else None
+    magnitude_shape = (kspace.shape[0], kspace.shape[1], kspace.shape[3], kspace.shape[4])
+    rss_img_vol = np.zeros(magnitude_shape, dtype=float) if enable_rss else None
+    espirit_img_vol = np.zeros(magnitude_shape, dtype=float) if enable_espirit else None
 
     # Precompute ESPIRiT maps per slice (once) if requested
     espirit_maps = {}
@@ -387,9 +394,12 @@ def dwi_reconstruction_diffusion(
                 esc_kspace, _, esc_image = emulated_single_coil_slice(np.transpose(kspace_post_grappa, (1, 2, 0)))
                 img_vol[average, slice_num] = esc_image
                 kspace_esc_vol[average, slice_num] = esc_kspace
-            rss_img_vol[average, slice_num] = np.sqrt(np.sum(np.abs(coil_domain) ** 2, axis=0))
-            post_grappa_img_vol[average, slice_num] = coil_domain
-            post_grappa_kspace_vol[average, slice_num] = np.transpose(kspace_post_grappa, (1, 2, 0))
+            if rss_img_vol is not None:
+                rss_img_vol[average, slice_num] = np.sqrt(np.sum(np.abs(coil_domain) ** 2, axis=0))
+            if post_grappa_img_vol is not None:
+                post_grappa_img_vol[average, slice_num] = coil_domain
+            if post_grappa_kspace_vol is not None:
+                post_grappa_kspace_vol[average, slice_num] = np.transpose(kspace_post_grappa, (1, 2, 0))
             if enable_espirit and slice_num in espirit_maps:
                 espirit_img_vol[average, slice_num] = combine_with_maps(coil_domain, espirit_maps[slice_num])
 

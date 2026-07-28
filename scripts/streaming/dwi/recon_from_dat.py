@@ -140,6 +140,8 @@ def build_dwi_payload(
     payload["metadata/averaging_schemes"] = np.asarray([tag for tag, _, _ in averaging_schemes], dtype="S20")
     available_combines: list[str] = []
     for name in combines:
+        if name == "rss" and recon_result.rss_images_per_average is None:
+            continue
         if name == "espirit" and recon_result.espirit_images_per_average is None:
             continue
         if name == "esc" and recon_result.esc_images_per_average is None:
@@ -153,13 +155,13 @@ def build_dwi_payload(
     # Shared volumes
     if recon_result.esc_images_per_average is not None:
         payload["images/esc_full"] = recon_result.esc_images_per_average.astype(np.float32)
-    if store_kspace:
+    if store_kspace and recon_result.post_grappa_kspace is not None:
         payload["kspace/post_grappa_full"] = recon_result.post_grappa_kspace.astype(np.complex64)
 
     combine_sources = {}
     if "esc" in available_combines:
         combine_sources["esc"] = recon_result.esc_images_per_average
-    if "rss" in available_combines:
+    if "rss" in available_combines and recon_result.rss_images_per_average is not None:
         combine_sources["rss"] = recon_result.rss_images_per_average
     if "espirit" in available_combines and recon_result.espirit_images_per_average is not None:
         combine_sources["espirit"] = recon_result.espirit_images_per_average
