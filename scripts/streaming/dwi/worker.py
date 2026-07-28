@@ -38,6 +38,10 @@ def acquire_lock(dat_file: Path) -> Path | None:
         return None
 
 
+def transfer_active(staging: Path) -> bool:
+    return (staging / ACTIVE_FLAG).exists() or any(staging.glob(f"{ACTIVE_FLAG}.*"))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Watch staging directory and run ESC reconstruction")
     parser.add_argument("--config", default="config/streaming/dwi.yaml")
@@ -85,8 +89,10 @@ def main() -> None:
         output_dir,
     )
 
+    transfer_seen = transfer_active(staging)
     while True:
         ready_files = list(staging.glob(f"*{READY_EXT}"))
+        transfer_seen = transfer_seen or bool(ready_files)
         random.shuffle(ready_files)  # Reduce lock contention across workers
         claimed = False
 
@@ -130,8 +136,9 @@ def main() -> None:
             break
 
         if not claimed:
-            active = (staging / ACTIVE_FLAG).exists()
-            if not active and not ready_files:
+            active = transfer_active(staging)
+            transfer_seen = transfer_seen or active
+            if transfer_seen and not active and not ready_files:
                 logging.info("Worker %d exiting (no files, transfer inactive)", args.worker_id)
                 break
             time.sleep(poll_seconds)

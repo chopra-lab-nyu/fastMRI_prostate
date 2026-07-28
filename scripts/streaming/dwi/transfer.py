@@ -17,7 +17,9 @@ import pandas as pd
 import yaml
 
 ACTIVE_FLAG = ".transfer_active"
-STATE_FILE = ".copied_manifest.json"
+CLAIMS_DIR = ".transfer_claims"
+DONE_DIR = ".transfer_done"
+FAILED_DIR = ".transfer_failed"
 PRESCAN_MAX_BYTES = 100e6
 MAIN_MIN_BYTES = 1e9
 PAIR_TOLERANCE = pd.Timedelta("5min")
@@ -165,6 +167,20 @@ def build_main_manifest(csv_path: Path, min_bytes: int, max_files: int | None = 
     return path_list
 
 
+def read_literal_manifest(csv_path: Path, min_bytes: int, max_files: int | None = None) -> List[str]:
+    df = pd.read_csv(csv_path)
+    if "path" not in df.columns:
+        raise ValueError("Manifest CSV must contain a 'path' column")
+    if "size" in df.columns:
+        size_bytes = df["size"].apply(human_to_bytes).astype("float64")
+        df = df[size_bytes >= min_bytes].copy()
+
+    paths = df["path"].dropna().astype(str).apply(lambda p: p.lstrip("./")).tolist()
+    if max_files is not None and max_files > 0:
+        paths = paths[:max_files]
+    return paths
+
+
 def staging_size_bytes(staging: Path) -> int:
     """Return total bytes in staging, handling race conditions with workers."""
     total = 0
@@ -201,9 +217,159 @@ def throttle(staging: Path, max_bytes: float, sleep_seconds: int) -> None:
         time.sleep(sleep_seconds)
 
 
+def validate_unique_basenames(manifest_paths: list[str]) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for rel in manifest_paths:
+        name = Path(rel).name
+        if name in seen:
+            duplicates.add(name)
+        seen.add(name)
+    if duplicates:
+        raise ValueError(f"Duplicate destination basenames in manifest: {sorted(duplicates)[:5]}")
+
+
+def select_existing_paths(
+    manifest_paths: list[str],
+    source_root: Path,
+    max_files: int | None,
+) -> tuple[list[str], int]:
+    selected: list[str] = []
+    missing = 0
+    for rel in manifest_paths:
+        if (source_root / rel.lstrip("./")).exists():
+            selected.append(rel)
+            if max_files is not None and len(selected) >= max_files:
+                break
+        else:
+            missing += 1
+    return selected, missing
+
+
+def write_json(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def claim_index(staging: Path, index: int) -> Path | None:
+    claims_dir = staging / CLAIMS_DIR
+    done_dir = staging / DONE_DIR
+    failed_dir = staging / FAILED_DIR
+    token = f"{index:06d}"
+    if (done_dir / f"{token}.json").exists() or (failed_dir / f"{token}.json").exists():
+        return None
+
+    lock_dir = claims_dir / f"{token}.lock"
+    try:
+        lock_dir.mkdir()
+        return lock_dir
+    except FileExistsError:
+        return None
+
+
+def copy_manifest_entry(
+    index: int,
+    rel: str,
+    source_root: Path,
+    staging: Path,
+    worker_id: int,
+    max_bytes: float,
+    poll_seconds: int,
+) -> str:
+    token = f"{index:06d}"
+    done_path = staging / DONE_DIR / f"{token}.json"
+    failed_path = staging / FAILED_DIR / f"{token}.json"
+    src = source_root / rel.lstrip("./")
+    dest = staging / src.name
+    tmp = Path(str(dest) + f".tmp.{worker_id}")
+    ready_marker = dest.with_suffix(dest.suffix + ".ready")
+
+    if done_path.exists() or failed_path.exists():
+        return "skipped"
+
+    if ready_marker.exists() and dest.exists():
+        write_json(
+            done_path,
+            {
+                "index": index,
+                "worker_id": worker_id,
+                "source": str(src),
+                "destination": str(dest),
+                "bytes": dest.stat().st_size,
+                "copy_s": 0.0,
+                "mb_per_s": None,
+                "status": "already_ready",
+            },
+        )
+        return "already_ready"
+
+    if not src.exists():
+        logging.warning("worker=%d missing index=%d source=%s", worker_id, index, src)
+        write_json(
+            failed_path,
+            {
+                "index": index,
+                "worker_id": worker_id,
+                "source": str(src),
+                "status": "missing",
+            },
+        )
+        return "missing"
+
+    throttle(staging, max_bytes, poll_seconds)
+    logging.info("worker=%d copying index=%d %s -> %s", worker_id, index, src, dest)
+    start = time.perf_counter()
+    try:
+        tmp.unlink(missing_ok=True)
+        copy_file(src, tmp)
+        tmp.replace(dest)
+        ready_marker.touch()
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        write_json(
+            failed_path,
+            {
+                "index": index,
+                "worker_id": worker_id,
+                "source": str(src),
+                "destination": str(dest),
+                "status": "failed",
+                "error": repr(exc),
+            },
+        )
+        raise
+
+    copy_s = time.perf_counter() - start
+    nbytes = dest.stat().st_size
+    mb_per_s = (nbytes / 1e6) / copy_s if copy_s > 0 else None
+    write_json(
+        done_path,
+        {
+            "index": index,
+            "worker_id": worker_id,
+            "source": str(src),
+            "destination": str(dest),
+            "bytes": nbytes,
+            "copy_s": copy_s,
+            "mb_per_s": mb_per_s,
+            "status": "copied",
+        },
+    )
+    logging.info(
+        "worker=%d copied index=%d file=%s gb=%.3f copy_s=%.2f mb_per_s=%.1f",
+        worker_id,
+        index,
+        dest.name,
+        nbytes / 1e9,
+        copy_s,
+        mb_per_s or 0.0,
+    )
+    return "copied"
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Copy .dat files into staging for streaming recon")
+    parser = argparse.ArgumentParser(description="Copy DWI .dat files into staging")
     parser.add_argument("--config", default="config/streaming/dwi.yaml")
+    parser.add_argument("--worker-id", type=int, required=True)
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -214,42 +380,89 @@ def main() -> None:
 
     raw_max_files = transfer_cfg.get("max_files")
     max_files = int(raw_max_files) if raw_max_files not in (None, "null", "None") else None
-    manifest_paths = build_main_manifest(
-        Path(transfer_cfg["manifest_csv"]), transfer_cfg["min_bytes"], max_files=max_files
-    )
     source_root = Path(transfer_cfg["source_root"])
+    if bool(transfer_cfg.get("literal_manifest", False)):
+        manifest_candidates = read_literal_manifest(Path(transfer_cfg["manifest_csv"]), transfer_cfg["min_bytes"], max_files)
+        max_files = None
+    else:
+        manifest_candidates = build_main_manifest(Path(transfer_cfg["manifest_csv"]), transfer_cfg["min_bytes"])
+    manifest_paths, skipped_missing = select_existing_paths(manifest_candidates, source_root, max_files)
+    validate_unique_basenames(manifest_paths)
+
     staging_dir = Path(transfer_cfg["staging_dir"])
     staging_dir.mkdir(parents=True, exist_ok=True)
+    (staging_dir / CLAIMS_DIR).mkdir(exist_ok=True)
+    (staging_dir / DONE_DIR).mkdir(exist_ok=True)
+    (staging_dir / FAILED_DIR).mkdir(exist_ok=True)
 
     max_bytes = float(transfer_cfg["max_staging_gb"]) * 1e9
     poll_seconds = int(transfer_cfg["poll_seconds"])
+    num_workers = int(transfer_cfg["num_workers"])
 
-    (staging_dir / ACTIVE_FLAG).touch()
+    if args.worker_id < 0 or args.worker_id >= num_workers:
+        raise ValueError(f"worker-id {args.worker_id} outside configured transfer.num_workers={num_workers}")
 
-    state_path = staging_dir / STATE_FILE
-    copied = set(json.loads(state_path.read_text())["files"]) if state_path.exists() else set()
+    active_flag = staging_dir / f"{ACTIVE_FLAG}.{args.worker_id}"
+    active_flag.touch()
+    copied = missing = failed = skipped = 0
+    logging.info(
+        (
+            "Transfer worker %d starting files=%d candidates=%d skipped_missing_before_selection=%d "
+            "staging=%s max_staging_gb=%.1f"
+        ),
+        args.worker_id,
+        len(manifest_paths),
+        len(manifest_candidates),
+        skipped_missing,
+        staging_dir,
+        max_bytes / 1e9,
+    )
 
-    for rel in manifest_paths:
-        if rel in copied:
-            continue
-        src = source_root / rel.lstrip("./")
-        if not src.exists():
-            logging.warning("Missing source %s", src)
-            continue
+    try:
+        while True:
+            claimed = False
+            for index, rel in enumerate(manifest_paths):
+                lock_dir = claim_index(staging_dir, index)
+                if lock_dir is None:
+                    continue
 
-        throttle(staging_dir, max_bytes, poll_seconds)
+                claimed = True
+                try:
+                    status = copy_manifest_entry(
+                        index,
+                        rel,
+                        source_root,
+                        staging_dir,
+                        args.worker_id,
+                        max_bytes,
+                        poll_seconds,
+                    )
+                    copied += int(status in {"copied", "already_ready"})
+                    missing += int(status == "missing")
+                    skipped += int(status == "skipped")
+                except Exception:
+                    failed += 1
+                    logging.exception("worker=%d failed index=%d path=%s", args.worker_id, index, rel)
+                finally:
+                    try:
+                        lock_dir.rmdir()
+                    except OSError:
+                        pass
+                break
 
-        dest = staging_dir / src.name
-        ready_marker = dest.with_suffix(dest.suffix + ".ready")
-        logging.info("Copying %s -> %s", src, dest)
-        copy_file(src, dest)
-        ready_marker.touch()
+            if not claimed:
+                break
+    finally:
+        active_flag.unlink(missing_ok=True)
 
-        copied.add(rel)
-        state_path.write_text(json.dumps({"files": sorted(copied)}, indent=2))
-
-    (staging_dir / ACTIVE_FLAG).unlink(missing_ok=True)
-    logging.info("Transfer complete: %d files", len(copied))
+    logging.info(
+        "Transfer worker %d complete copied=%d missing=%d failed=%d skipped=%d",
+        args.worker_id,
+        copied,
+        missing,
+        failed,
+        skipped,
+    )
 
 
 if __name__ == "__main__":

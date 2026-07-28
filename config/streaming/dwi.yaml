@@ -5,6 +5,7 @@ transfer:
   max_staging_gb: 7000
   min_bytes: 1000000000
   poll_seconds: 30
+  num_workers: 8
 
 process:
   output_dir: /gpfs/scratch/td2105/dwi_stream/recons_rss_espirit
