@@ -187,6 +187,7 @@ transfer:
   max_staging_gb: 500                     # Throttle when staging exceeds this
   min_bytes: 1000000000                   # Skip files smaller than 1GB
   poll_seconds: 30                        # Transfer polling interval
+  num_workers: 8                          # Transfer array size
 
 process:
   output_dir: /scratch/output             # Final HDF5 output location
@@ -236,6 +237,23 @@ process:
   delete_dat: true
 ```
 
+### Configuration: DWI Direct ESPIRiT State Bank (`config/streaming/dwi_direct_state_bank.yaml`)
+
+This backfill path converts missing `#AXDIFFUSION_HVD.dat` files directly to compact ESPIRiT state-bank H5s. It stages DATs from `yarra_rds` with the data-mover transfer protocol, then CPU workers write only cumulative per-average ESPIRiT banks under `/gpfs/scratch/td2105/dwi_stream/recons_espirit_state_bank_v2`. It does not create full recon H5s, ADC, b1500, RSS, ESC, or post-GRAPPA output datasets.
+
+```yaml
+transfer:
+  manifest_csv: /gpfs/data/prostatelab/processed_data/csv/kspace_prostate_dwi_state_bank_missing_axdiffusion_hvd.csv
+  source_root: /mnt/td2105/MRIScan/Archive/yarra_rds
+  staging_dir: /gpfs/scratch/td2105/dwi_stream/staging_direct_state_bank
+  literal_manifest: true
+
+process:
+  output_dir: /gpfs/scratch/td2105/dwi_stream/recons_espirit_state_bank_v2
+  source_h5_dir_for_metadata: /gpfs/scratch/td2105/dwi_stream/recons_rss_espirit
+  delete_dat: true
+```
+
 ### Build Manifest CSV (Examples)
 
 Commands below assume you start in:
@@ -272,6 +290,14 @@ OUT="/gpfs/data/prostatelab/processed_data/csv/kspace_prostate_axt2_file_metadat
 
 ### Running the Pipeline
 
+| Goal | Commands |
+|------|----------|
+| DWI full recon H5s | `sbatch sbatch/streaming/dwi/workers.sh` then `sbatch sbatch/streaming/dwi/transfer.sh` |
+| T2 recon H5s | `sbatch sbatch/streaming/t2/workers.sh` then `sbatch sbatch/streaming/t2/transfer.sh` |
+| Refresh ESPIRiT in existing DWI H5s | `sbatch sbatch/streaming/dwi/refresh_espirit_workers.sh` then `sbatch sbatch/streaming/dwi/refresh_espirit_transfer.sh` |
+| Build ESPIRiT state-bank H5s from existing full DWI H5s | `sbatch sbatch/streaming/dwi/build_espirit_state_bank_array.sh` |
+| Backfill missing ESPIRiT state-bank H5s directly from DATs | Run the four-step direct state-bank sequence below |
+
 **DWI**
 ```bash
 sbatch sbatch/streaming/dwi/workers.sh
@@ -292,22 +318,34 @@ sbatch sbatch/streaming/dwi/refresh_espirit_transfer.sh
 
 The refresh pipeline stages DATs for the `recon_only` cohort, refreshes the `aligned` subset first, writes `aligned_complete.marker` in the refresh staging directory when that subset finishes, and then continues the remaining `recon_only` cases.
 
+**DWI direct ESPIRiT state-bank backfill**
+```bash
+sbatch sbatch/streaming/dwi/make_axdiffusion_hvd_manifest.sh
+python -m scripts.streaming.dwi.build_state_bank_missing_manifest
+sbatch sbatch/streaming/dwi/direct_state_bank_array.sh
+sbatch sbatch/streaming/dwi/direct_state_bank_transfer.sh
+```
+
+Run the missing-manifest builder after the manifest job completes. Submit workers before transfer so compute nodes are waiting when data-mover tasks create `.dat.ready` markers.
+
 ### How It Works
 
 **Transfer Script (`scripts.streaming.dwi.transfer`):**
 1. Reads manifest CSV and filters by size
 2. Parses Siemens filename metadata to pair main scans with prescans
 3. Copies files to staging, creates `.ready` marker after each copy
-4. Maintains `.copied_manifest.json` to track progress (resumable)
+4. Maintains `.transfer_done/`, `.transfer_failed/`, and `.transfer_claims/` state
 5. Throttles when staging exceeds `max_staging_gb`
-6. Sets `.transfer_active` flag while running
+6. Sets `.transfer_active.<worker_id>` flags while running
 
 **Worker Script (`scripts.streaming.dwi.worker`):**
 1. Watches for `*.dat.ready` markers in staging
 2. Uses **work-stealing**: any worker can grab any unlocked file
 3. Claims files via atomic `mkdir()` lock (prevents duplicate processing)
 4. Processes file → writes `.h5` → deletes `.dat` and markers
-5. Exits when transfer inactive and no files remain
+5. Exits after transfer has run, transfer is inactive, and no files remain
+
+The direct state-bank path uses the same `.dat.ready`/lock protocol, but `scripts.streaming.dwi.direct_state_bank_worker` calls `scripts.streaming.dwi.direct_state_bank_from_dat` and writes only the ESPIRiT state-bank schema. `scripts.streaming.dwi.build_state_bank_missing_manifest` compares DAT stems against existing state-bank H5 names after stripping the patient-ID suffix.
 
 T2 uses the same protocol via `scripts.streaming.t2.transfer` and `scripts.streaming.t2.worker`.
 
