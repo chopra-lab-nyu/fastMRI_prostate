@@ -1,0 +1,5 @@
+process:
+  input_dir: /gpfs/scratch/td2105/dwi_stream/recons_rss_espirit
+  output_dir: /gpfs/scratch/td2105/dwi_stream/recons_espirit_state_bank_v2
+  glob: "*.h5"
+  overwrite: false

@@ -28,10 +28,23 @@ ALL_DIRECTIONS: Tuple[str, ...] = (
 DEFAULT_DIRECTIONS: Tuple[str, ...] = ALL_DIRECTIONS
 DEFAULT_AVERAGING_SCHEMES: Tuple[Tuple[str, int, int], ...] = (
     ("b50_1_b1000_1", 1, 1),
+    ("b50_2_b1000_1", 2, 1),
+    ("b50_2_b1000_2", 2, 2),
+    ("b50_3_b1000_2", 3, 2),
+    ("b50_3_b1000_3", 3, 3),
+    ("b50_4_b1000_3", 4, 3),
+    ("b50_4_b1000_4", 4, 4),
+    ("b50_4_b1000_5", 4, 5),
+    ("b50_4_b1000_6", 4, 6),
+    ("b50_4_b1000_7", 4, 7),
+    ("b50_4_b1000_8", 4, 8),
+    ("b50_4_b1000_9", 4, 9),
+    ("b50_4_b1000_10", 4, 10),
+    ("b50_4_b1000_11", 4, 11),
+    ("b50_4_b1000_12", 4, 12),
     ("b50_1_b1000_2", 1, 2),
     ("b50_1_b1000_3", 1, 3),
     ("b50_2_b1000_6", 2, 6),
-    ("b50_4_b1000_12", 4, 12),
 )
 DEFAULT_COMBINES: Tuple[str, ...] = ("rss", "espirit", "esc")
 REQUIRED_FOR_METRICS = set(ALL_DIRECTIONS)
