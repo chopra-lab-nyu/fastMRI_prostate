@@ -1,0 +1,21 @@
+manifest:
+  csv: /gpfs/data/prostatelab/processed_data/csv/kspace_prostate_dwi_state_bank_missing_axdiffusion_hvd.csv
+  source_root: /mnt/td2105/MRIScan/Archive/yarra_rds
+
+transfer:
+  manifest_csv: /gpfs/data/prostatelab/processed_data/csv/kspace_prostate_dwi_state_bank_missing_axdiffusion_hvd.csv
+  source_root: /mnt/td2105/MRIScan/Archive/yarra_rds
+  staging_dir: /gpfs/scratch/td2105/dwi_stream/staging_direct_state_bank
+  max_staging_gb: 7000
+  min_bytes: 1000000000
+  poll_seconds: 30
+  num_workers: 8
+  literal_manifest: true
+
+process:
+  output_dir: /gpfs/scratch/td2105/dwi_stream/recons_espirit_state_bank_v2
+  source_h5_dir_for_metadata: /gpfs/scratch/td2105/dwi_stream/recons_rss_espirit
+  overwrite: false
+  enable_phasecorr: false
+  poll_seconds: 10
+  delete_dat: true
